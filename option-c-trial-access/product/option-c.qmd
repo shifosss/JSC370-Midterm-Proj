@@ -1,0 +1,39 @@
+---
+title: "Option C — Clinical Trial Access Gap: Trial Site Density vs Disease Burden"
+author: ""
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    self-contained: true
+---
+
+## Introduction
+
+## Data Sources
+
+- **ClinicalTrials.gov v2 API**: trial locations, phase, status, sponsor type, eligibility text
+- **CDC PLACES (Socrata API)**: county/state-level disease burden estimates
+- **US Census ACS** (optional): SES covariates to explain mismatch
+
+## Methods
+
+### Data Acquisition
+
+### Mismatch Index Construction
+
+## EDA
+
+### Trial Site Counts per 100k
+
+### Burden Estimates with Confidence Intervals
+
+### Mismatch Index Maps and Ranked Lists
+
+## Preliminary Modeling
+
+## Limitations
+
+## Conclusion and Final-Project Plan

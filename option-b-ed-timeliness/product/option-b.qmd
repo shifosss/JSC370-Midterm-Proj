@@ -1,0 +1,37 @@
+---
+title: "Option B — ED Timeliness vs Provider Supply and Socioeconomic Context"
+author: ""
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    self-contained: true
+---
+
+## Introduction
+
+## Data Sources
+
+- **CMS Hospital Timeliness Measures**: ED timeliness scores by hospital
+- **US Census ACS API**: county-level poverty, income, insurance coverage
+- **NPI Registry**: primary care provider density aggregated to county
+
+## Methods
+
+### Data Acquisition
+
+### Geographic Joins (Hospital → County)
+
+## EDA
+
+### Choropleths and Binned Plots
+
+### Provider Density Overlays
+
+## Baseline Modeling
+
+## Limitations
+
+## Conclusion and Final-Project Plan

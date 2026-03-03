@@ -1,0 +1,37 @@
+---
+title: "Option A — Post-Market Drug Safety Signals vs Public Attention"
+author: ""
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    self-contained: true
+---
+
+## Introduction
+
+## Data Sources
+
+- **openFDA drug adverse events (FAERS-derived)**: serious adverse event reports, seriousness flags, patient/drug/reaction data
+- **GDELT DOC API**: news attention proxy (article volume and tone)
+- **Wikimedia Pageviews API**: public interest proxy (daily pageviews per drug article)
+
+## Methods
+
+### Data Acquisition
+
+### Cleaning and Alignment
+
+## EDA
+
+### Weekly Time-Series Alignment
+
+### Cross-Correlation and Lead/Lag Exploration
+
+## Preliminary Modeling
+
+## Limitations
+
+## Conclusion and Final-Project Plan
