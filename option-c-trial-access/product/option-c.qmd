@@ -16,13 +16,13 @@ format:
 
 - **ClinicalTrials.gov v2 API**: trial locations, phase, status, sponsor type, eligibility text
 - **CDC PLACES (Socrata API)**: county/state-level disease burden estimates
-- **US Census ACS** (optional): SES covariates to explain mismatch
+- **US Census ACS** (optional): SES covariates for coverage interpretation
 
 ## Methods
 
 ### Data Acquisition
 
-### Mismatch Index Construction
+### Coverage Alignment Baseline
 
 ## EDA
 
@@ -30,9 +30,9 @@ format:
 
 ### Burden Estimates with Confidence Intervals
 
-### Mismatch Index Maps and Ranked Lists
+### Site-Density and Coverage-Residual Maps
 
-## Preliminary Modeling
+## Coverage Outlier Analysis
 
 ## Limitations
 

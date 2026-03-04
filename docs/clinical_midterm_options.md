@@ -1,6 +1,6 @@
 # Four Updated Research Options (EDA + ML Runway)
 
-These options are written to be **EDA-friendly for the project** while still having a clear **machine-learning extension** for the final project.
+These options are written to be **EDA-friendly for the midterm** while still having a clear **machine-learning extension** for the final project.
 
 ---
 
@@ -74,38 +74,44 @@ Aggregate to county/ZIP/state to compute provider density.
 
 ---
 
-## Option C — “Clinical trial access gap”: trial site density vs disease burden (geography + ranking)
+## Option C — Clinical trial site distribution vs disease burden (geography + modeling)
 
-### Research questions (ML‑ready, not obvious at a glance)
-1. **Mismatch ranking:** Where is the largest burden–trial access mismatch (high burden percentile, low trial density percentile)?
-2. **Sponsor behavior:** Does mismatch differ for industry vs academic sponsors after controlling for burden + SES?
-3. **Topic segmentation:** Do trial topics/subtypes (from outcomes/eligibility text) cluster into groups with different geographic footprints?
+### Research questions (ML-ready, not obvious at a glance)
+1. **Nonlinear alignment:** How does **trial site density** change with **disease burden** across geographies (linear vs thresholded vs saturating)?
+2. **Sponsor effects:** After controlling for burden and basic SES context, do **industry vs academic** trials show different geographic concentration patterns?
+3. **Coverage outliers (model-based, no composite index):** Which areas have **higher/lower trial site density than expected** given burden + covariates (identified via model residuals rather than a handcrafted “mismatch” score)?
+4. **Topic segmentation:** Do trial topics/subtypes (from outcomes/eligibility text) cluster into groups with distinct geographic footprints?
 
 ### APIs + exactly what to pull
 **1) ClinicalTrials.gov v2 API**  
 Pull:
 - Trial identifiers/titles: `protocolSection.identificationModule.nctId`, `protocolSection.identificationModule.officialTitle`
-- Locations: `protocolSection.contactsLocationsModule.locations` (state/country; optionally city)
-- Trial descriptors: phase, status, enrollment (if available), sponsor type (if available)
+- Locations: `protocolSection.contactsLocationsModule.locations` (extract state/country; optionally city)
+- Trial descriptors: phase, status (recruiting/completed), enrollment (if available), sponsor type (if available)
+- Text fields for topic modeling (if available in returned modules): brief summary, eligibility, primary outcomes
 - Filter using condition query parameter: `query.cond`
 
 **2) CDC PLACES (burden proxy; Socrata API)**  
 Pull:
 - Geography keys: `locationid`, `locationname`, `stateabbr`
-- Measure key: `measureid`
+- Measure key: `measureid` (choose measures aligned with your condition)
 - Outcome and uncertainty: `data_value`, `low_confidence_limit`, `high_confidence_limit`
-- Value type: `datavaluetypeid` (e.g., age-adjusted)
+- Value type: `datavaluetypeid` (prefer age-adjusted where appropriate)
 
-**3) US Census ACS (optional, to explain mismatch)**  
-Pull SES features used to explain mismatch (poverty, income, insurance, etc.).
+**3) US Census ACS (optional, explanatory covariates)**  
+Pull SES features you will explicitly use (e.g., poverty rate, median income, insurance coverage), at the same geographic granularity.
 
 ### Midterm EDA deliverables
-- Trial site counts per 100k (state or county)
-- Burden estimates + confidence intervals
-- “Mismatch index” maps and ranked lists
+- Trial site density per 100k (state or county) by: sponsor type, phase, status
+- Burden prevalence estimates with confidence intervals
+- Scatter + binned plots of site density vs burden (with uncertainty bands)
+- Maps of **site density** and **burden** side-by-side
+- A baseline “expected density” model (e.g., Poisson/negative binomial or tree model) and visualization of **residuals** to highlight over/under-covered areas (without defining a bespoke index)
 
 ### Final ML extension
-- Predict trial density/mismatch from burden + SES; topic modeling/embeddings for trial text; interactive mismatch explorer
+- Predict site density (or probability of having any site) from burden + SES + infrastructure proxies
+- Topic modeling/embeddings for trial text and stratified geographic analyses by topic cluster
+- Interactive explorer: filter by condition, sponsor type, phase, topic cluster, and geography
 
 ---
 
@@ -151,5 +157,5 @@ Pull citations/venue metadata if you decide to incorporate impact-style outcomes
 ---
 
 ## Recommended scope controls (to keep this feasible)
-- Choose **one condition area** and one geographic level (state OR county) for the project.
+- Choose **one condition area** and one geographic level (state OR county) for the midterm.
 - Use a focused time window and a small curated drug/hospital/trial list initially, then scale up if time allows.
