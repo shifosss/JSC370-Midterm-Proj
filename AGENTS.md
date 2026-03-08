@@ -2,59 +2,71 @@
 
 ## Project Structure & Module Organization
 
-This repository is organized by research option:
+This repository is now centered on `option-c-trial-access/`. Treat Option C as the only active workstream unless the user explicitly asks to revive archived material.
+
+Active Option C structure:
+
+- `option-c-trial-access/discover/data_acquiring/`: exploratory acquisition notebooks, including `api_call_data_grabbing.ipynb`
+- `option-c-trial-access/discover/modified_data/`: discovery-stage modeling tables such as `county_modeling_final.csv` and `state_modeling_final.csv`
+- `option-c-trial-access/discover/results/`: exploratory figures and maps used to assess coverage, burden, SES, and sponsor patterns
+- `option-c-trial-access/discover/County_level_data_documentation.md`: county-level variable and source notes
+- `option-c-trial-access/discover/State_level_data_documentation.md`: state-level variable and source notes
+- `option-c-trial-access/product/option-c.qmd`: production Quarto report
+- `option-c-trial-access/product/data/raw/`: immutable raw API pulls for the production pipeline
+- `option-c-trial-access/product/data/modified/`: cleaned datasets consumed by the Quarto report
+- `option-c-trial-access/product/results/`: rendered/report-ready outputs tied to the production workflow
+
+Archived reference-only work:
 
 - `option-a-drug-safety/`
 - `option-b-ed-timeliness/`
-- `option-c-trial-access/`
 - `option-d-conflicts-of-interest/`
 
-Each option follows the same layout:
+Do not add new analysis, pipelines, or documentation to archived options unless explicitly requested. Use them only as historical reference for patterns or prior decisions.
 
-- `discover/`: exploratory work (notebooks/scripts) and `modified_data/`
-- `product/`: final deliverable and reproducible pipeline
-- `product/data/raw/`: immutable API pulls
-- `product/data/modified/`: cleaned/intermediate datasets used by Quarto
-- `product/option-<letter>.qmd`: one production report per option
-- `PLAN.md`: Plan for API Call, EDA, and modeling for that option
+Shared project documents live in `docs/`:
 
-Use `docs/` for shared project documentation and `.env` (gitignored) for API keys.
+- `docs/clinical_midterm_options.md`: original option specification
+- `docs/deep-research-report.md`: background framing and research motivation
 
-## Documentation Specification
-
-- `clinical_midterm_options.md`: The specification of the latest version of the four options
-- `deep-research-report.md`: Background information and research question motivations
+Keep secrets in `.env` (gitignored).
 
 ## Build, Test, and Development Commands
 
-- `quarto preview option-a-drug-safety/product/option-a.qmd`: live preview while editing.
-- `quarto render option-b-ed-timeliness/product/option-b.qmd`: execute and render a final HTML report.
-- `Get-ChildItem option-*\\product\\option-*.qmd | ForEach-Object { quarto render $_.FullName }`: render all option reports in PowerShell.
-- `jupyter notebook option-b-ed-timeliness/discover/data_acquiring/api_call_data_grabbing.ipynb`: run discovery/data-acquisition workflow.
+- `quarto preview option-c-trial-access/product/option-c.qmd`: live preview while editing the active report
+- `quarto render option-c-trial-access/product/option-c.qmd`: execute and render the Option C report
+- `jupyter notebook option-c-trial-access/discover/data_acquiring/api_call_data_grabbing.ipynb`: run the discovery/data-acquisition notebook
+- `Get-ChildItem option-c-trial-access\\discover\\results`: quickly inspect exploratory output artifacts
+
+Avoid repo-wide render commands by default; the archived options are no longer part of the active lifecycle.
 
 ## Coding Style & Naming Conventions
 
-Use clear, reproducible analysis code and keep Quarto documents sectioned (`Introduction`, `Data Sources`, `Methods`, `EDA`, `Limitations`, `Conclusion`). Prefer:
+Use clear, reproducible analysis code and keep `option-c.qmd` sectioned around the current report flow (`Introduction`, `Data Sources`, `Methods`, `EDA`, `Coverage Outlier Analysis`, `Limitations`, `Conclusion and Final-Project Plan`).
+
+Prefer:
 
 - 4-space indentation in Python code cells
-- `snake_case` for variables/files (for example, `cms_ed_meta_yv7e-xc69.json`)
-- descriptive, option-scoped filenames (`option-b.qmd`, `faers_semaglutide_2021_2024.json`)
+- `snake_case` for variables and filenames
+- descriptive Option C filenames such as `county_modeling_final.csv` or `map_trial_density_tile.png`
 
-Do not rewrite raw data files after download; create transformed outputs in `modified/` or `modified_data/`.
+Do not rewrite raw data files after download. New transformed datasets belong in `discover/modified_data/` or `product/data/modified/`. New figures belong in `discover/results/` for exploratory work or `product/results/` for production outputs.
 
 ## Testing Guidelines
 
-There is no dedicated automated test suite yet. Treat report rendering as the required validation step:
+There is no dedicated automated test suite yet. Treat Option C rendering and reproducibility checks as the required validation step:
 
-1. Run `quarto render` for the affected option.
-2. Confirm no execution errors and that figures/tables load from expected paths.
-3. For notebook edits, rerun changed cells from a clean kernel and verify outputs written to the correct data directory.
+1. Run `quarto render option-c-trial-access/product/option-c.qmd` after report or production-data changes.
+2. Confirm there are no execution errors and that tables/figures resolve from the expected Option C paths.
+3. For notebook edits, rerun changed cells from a clean kernel and verify outputs land in the intended `discover/` or `product/` data directory.
+4. If you update documentation references or filenames, make sure the linked paths still exist.
 
 ## Commit & Pull Request Guidelines
 
-Existing history uses short, sentence-case messages (for example, `Initial commit`). Follow that style with scope:
+Existing history uses short, sentence-case messages. Keep that style, scoped to the active workstream:
 
-- `option-c: refine mismatch index calculation`
-- `option-b: update CMS raw extract metadata`
+- `option-c: refine county coverage residual plots`
+- `option-c: update trial access data documentation`
+- `docs: archive inactive options in repo guidance`
 
-PRs should include: purpose, affected option(s), changed data sources/APIs, reproduction command(s), and a screenshot or rendered HTML snippet when report output changes. Mention any new environment variables explicitly.
+PRs should include: purpose, affected Option C components, changed data sources or APIs, reproduction commands, and a screenshot or rendered HTML snippet when report output changes. Mention any new environment variables explicitly.

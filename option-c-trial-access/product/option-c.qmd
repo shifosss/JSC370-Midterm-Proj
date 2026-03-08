@@ -1,39 +1,2492 @@
 ---
-title: "Option C — Clinical Trial Access Gap: Trial Site Density vs Disease Burden"
+title: "Option C - Clinical Trial Access Gap for Type 2 Diabetes"
+subtitle: "Notebook transcription, exploratory results, and model-ready data products"
 author: ""
 date: today
 format:
   html:
     toc: true
     toc-depth: 3
-    code-fold: true
+    number-sections: true
+    code-fold: show
+    code-summary: "Show code"
     self-contained: true
+    theme: cosmo
+execute:
+  echo: true
+  warning: false
+  message: false
 ---
 
-## Introduction
 
-## Data Sources
+## Overview
 
-- **ClinicalTrials.gov v2 API**: trial locations, phase, status, sponsor type, eligibility text
-- **CDC PLACES (Socrata API)**: county/state-level disease burden estimates
-- **US Census ACS** (optional): SES covariates for coverage interpretation
+This report is the production Quarto transcription of the completed notebook at `discover/data_acquiring/api_call_data_grabbing.ipynb`. It preserves the notebook code, reproduces the full acquisition and exploratory workflow, and brings the results into a cleaner report structure that is ready for the next modeling phase.
 
-## Methods
+The current scope is U.S. Type 2 diabetes clinical trial access. The workflow links ClinicalTrials.gov site data with CDC PLACES burden measures, ACS socioeconomic context, rurality, Medicaid expansion status, and infrastructure proxies such as endocrinologist density and academic medical center presence.
 
-### Data Acquisition
+Supporting data dictionaries:
 
-### Coverage Alignment Baseline
+- [State-level data documentation](../discover/State_level_data_documentation.md)
+- [County-level data documentation](../discover/County_level_data_documentation.md)
 
-## EDA
 
-### Trial Site Counts per 100k
+### Executive Summary
 
-### Burden Estimates with Confidence Intervals
+- The pipeline collected 3,646 U.S. Type 2 diabetes studies, 47,118 U.S. site rows, and 20,407 unique state-trial pairs.
+- Trial availability is concentrated rather than smoothly aligned with diabetes burden. At the state level, the strongest under-covered states by coverage residual are Wyoming, Alaska, and New Hampshire, while Idaho, North Dakota, and the District of Columbia are the strongest over-covered states.
+- Sponsor mix is overwhelmingly industry-led. Across states, the mean industry share is 87.2%, and national trial density is much higher for industry than non-industry portfolios.
+- County access gaps are sharper than state summaries suggest. Only 26.8% of counties host a trial site, and among counties without a site the median distance to the nearest site is 58.8 km; 24.1% are more than 100 km away.
+- The exploratory results suggest that access behaves more like an infrastructure concentration problem than a burden-matching problem. SES correlates with the state coverage residual are weak, and county distance patterns appear more related to place and service availability than to burden alone.
 
-### Site-Density and Coverage-Residual Maps
 
-## Coverage Outlier Analysis
+### Interpretation Before Modeling
 
-## Limitations
+The descriptive evidence already points to a useful modeling frame. Disease burden alone does not explain where trial sites cluster. Industry sponsorship, provider concentration, and institutional infrastructure appear to matter at least as much, and probably more, than prevalence itself. The state residuals and county distance measures should therefore be treated as baseline descriptive targets for the next phase rather than as causal effects.
 
-## Conclusion and Final-Project Plan
+
+## Reproducibility Setup
+
+The notebook code uses paths relative to `discover/data_acquiring/`. The hidden setup chunk below preserves that execution context so the original code can run from `product/option-c.qmd` without altering the notebook cells themselves.
+
+
+```{python}
+#| label: execution-context
+#| include: false
+import os
+import pathlib
+
+candidate_dirs = [
+    pathlib.Path.cwd(),
+    pathlib.Path.cwd() / '..' / 'discover' / 'data_acquiring',
+    pathlib.Path.cwd() / 'option-c-trial-access' / 'discover' / 'data_acquiring',
+]
+
+for candidate in candidate_dirs:
+    candidate = candidate.resolve()
+    if (candidate / 'api_call_data_grabbing.ipynb').exists():
+        os.chdir(candidate)
+        break
+else:
+    raise FileNotFoundError('Could not locate option-c-trial-access/discover/data_acquiring.')
+```
+
+```{python}
+#| label: notebook-setup
+#| include: false
+import json
+import os
+import pathlib
+import re
+import time
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+import seaborn as sns
+import requests
+from dotenv import load_dotenv
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+DOTENV_PATH = pathlib.Path("../../../.env")
+load_dotenv(dotenv_path=DOTENV_PATH)
+
+RAW = pathlib.Path("../../product/data/raw")
+MOD = pathlib.Path("../../product/data/modified")
+RESULTS = pathlib.Path("../results")
+RAW.mkdir(parents=True, exist_ok=True)
+MOD.mkdir(parents=True, exist_ok=True)
+TEMP = MOD / "temp"
+TEMP.mkdir(parents=True, exist_ok=True)
+RESULTS.mkdir(parents=True, exist_ok=True)
+
+CENSUS_KEY = os.getenv("CENSUS_API_KEY", "")
+REQUEST_PAUSE_SEC = 0.2  # polite delay between API calls
+
+US_STATE_ABBR = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC"
+}
+
+STATE_NAME_TO_ABBR = {
+    "Alabama": "AL", "Alaska": "AK", "Arizona": "AZ", "Arkansas": "AR", "California": "CA", "Colorado": "CO", "Connecticut": "CT", "Delaware": "DE", "District Of Columbia": "DC", "Florida": "FL", "Georgia": "GA", "Hawaii": "HI", "Idaho": "ID", "Illinois": "IL", "Indiana": "IN", "Iowa": "IA", "Kansas": "KS", "Kentucky": "KY", "Louisiana": "LA", "Maine": "ME", "Maryland": "MD", "Massachusetts": "MA", "Michigan": "MI", "Minnesota": "MN", "Mississippi": "MS", "Missouri": "MO", "Montana": "MT", "Nebraska": "NE", "Nevada": "NV", "New Hampshire": "NH", "New Jersey": "NJ", "New Mexico": "NM", "New York": "NY", "North Carolina": "NC", "North Dakota": "ND", "Ohio": "OH", "Oklahoma": "OK", "Oregon": "OR", "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC", "South Dakota": "SD", "Tennessee": "TN", "Texas": "TX", "Utah": "UT", "Vermont": "VT", "Virginia": "VA", "Washington": "WA", "West Virginia": "WV", "Wisconsin": "WI", "Wyoming": "WY"
+}
+
+FIPS_TO_ABBR = {
+    "01": "AL", "02": "AK", "04": "AZ", "05": "AR", "06": "CA", "08": "CO", "09": "CT", "10": "DE", "11": "DC", "12": "FL", "13": "GA", "15": "HI", "16": "ID", "17": "IL", "18": "IN", "19": "IA", "20": "KS", "21": "KY", "22": "LA", "23": "ME", "24": "MD", "25": "MA", "26": "MI", "27": "MN", "28": "MS", "29": "MO", "30": "MT", "31": "NE", "32": "NV", "33": "NH", "34": "NJ", "35": "NM", "36": "NY", "37": "NC", "38": "ND", "39": "OH", "40": "OK", "41": "OR", "42": "PA", "44": "RI", "45": "SC", "46": "SD", "47": "TN", "48": "TX", "49": "UT", "50": "VT", "51": "VA", "53": "WA", "54": "WV", "55": "WI", "56": "WY"
+}
+
+# Approximate state tile-grid positions for map-like choropleths without GIS dependencies.
+STATE_TILE_POS = {
+    "WA": (0, 0), "MT": (1, 0), "ND": (2, 0), "MN": (3, 0), "WI": (4, 0), "MI": (5, 0), "VT": (7, 0), "ME": (8, 0),
+    "OR": (0, 1), "ID": (1, 1), "SD": (2, 1), "IA": (3, 1), "IL": (4, 1), "IN": (5, 1), "OH": (6, 1), "PA": (7, 1), "NY": (8, 1),
+    "CA": (0, 2), "NV": (1, 2), "WY": (2, 2), "NE": (3, 2), "MO": (4, 2), "KY": (5, 2), "WV": (6, 2), "VA": (7, 2), "MD": (8, 2),
+    "AZ": (1, 3), "UT": (2, 3), "CO": (3, 3), "KS": (4, 3), "AR": (5, 3), "TN": (6, 3), "NC": (7, 3), "SC": (8, 3), "DC": (9, 3),
+    "NM": (2, 4), "OK": (4, 4), "LA": (5, 4), "MS": (6, 4), "AL": (7, 4), "GA": (8, 4),
+    "TX": (4, 5), "FL": (9, 5),
+    "AK": (0, 6), "HI": (1, 6),
+    "NH": (7, 0), "MA": (8, 0), "CT": (8, 1), "RI": (8, 1), "NJ": (8, 2), "DE": (8, 2)
+}
+
+
+def normalize_state(value):
+    if value is None:
+        return None
+    txt = re.sub(r"\s+", " ", str(value)).strip()
+    if not txt:
+        return None
+    up = txt.upper()
+    if up in US_STATE_ABBR:
+        return up
+    title = txt.title()
+    return STATE_NAME_TO_ABBR.get(title)
+
+
+def phase_group(value):
+    if pd.isna(value):
+        return "UNKNOWN"
+    txt = str(value).strip()
+    if not txt:
+        return "UNKNOWN"
+    parts = [p.strip() for p in txt.split(",") if p.strip()]
+    if not parts:
+        return "UNKNOWN"
+    return parts[0].upper()
+
+
+def tile_choropleth(df, value_col, title, cmap_name, out_name, vcenter=None):
+    val_map = dict(zip(df["stateabbr"], df[value_col]))
+    vals = np.array([v for v in val_map.values() if pd.notna(v)])
+
+    if len(vals) == 0:
+        print(f"No values available for {value_col}; skipping {title}.")
+        return
+
+    if vcenter is None:
+        norm = mpl.colors.Normalize(vmin=float(np.nanmin(vals)), vmax=float(np.nanmax(vals)))
+    else:
+        norm = mpl.colors.TwoSlopeNorm(vmin=float(np.nanmin(vals)), vcenter=vcenter, vmax=float(np.nanmax(vals)))
+
+    cmap = mpl.cm.get_cmap(cmap_name)
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    for st, (x, y) in STATE_TILE_POS.items():
+        v = val_map.get(st, np.nan)
+        color = "#eeeeee" if pd.isna(v) else cmap(norm(v))
+        rect = plt.Rectangle((x, y), 1, 1, facecolor=color, edgecolor="white", linewidth=1.5)
+        ax.add_patch(rect)
+        ax.text(x + 0.5, y + 0.5, st, ha="center", va="center", fontsize=8)
+
+    ax.set_xlim(0, 10)
+    ax.set_ylim(0, 8)
+    ax.invert_yaxis()
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title(title)
+
+    sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.035, pad=0.02)
+    cbar.set_label(value_col)
+
+    out_path = RESULTS / out_name
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.show()
+    print("Saved figure:", out_path)
+
+
+
+
+def fetch_socrata_rows(url, where_clause=None, order_by=None, limit=10_000, timeout=60, sleep_sec=0.5):
+    """Page through a Socrata endpoint using $limit/$offset and return all rows."""
+    all_rows = []
+    offset = 0
+    while True:
+        params = {"$limit": limit, "$offset": offset}
+        if where_clause:
+            params["$where"] = where_clause
+        if order_by:
+            params["$order"] = order_by
+        batch = request_json(url, params=params, timeout=timeout)
+        if not batch:
+            break
+        all_rows.extend(batch)
+        if len(batch) < limit:
+            break
+        offset += limit
+        time.sleep(sleep_sec)
+    return all_rows
+sns.set_theme(style="whitegrid")
+
+def request_json(url, params=None, timeout=30):
+    resp = requests.get(url, params=params, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+
+
+def safe_percent(numerator, denominator):
+    """Compute 100 * numerator / denominator, returning NaN where denominator <= 0."""
+    num = pd.to_numeric(numerator, errors="coerce")
+    den = pd.to_numeric(denominator, errors="coerce")
+    return np.where(den > 0, 100.0 * num / den, np.nan)
+
+
+def safe_rate_per_100k(count, population):
+    """Compute count per 100 000 population, returning NaN where population <= 0."""
+    c = pd.to_numeric(count, errors="coerce")
+    p = pd.to_numeric(population, errors="coerce")
+    return np.where(p > 0, 1e5 * c / p, np.nan)
+
+print("Raw dir:", RAW.resolve())
+print("Modified dir:", MOD.resolve())
+print("Results dir:", RESULTS.resolve())
+print("Census API key present:", bool(CENSUS_KEY))
+```
+
+## 1. ClinicalTrials.gov Acquisition and Flattening
+
+This section captures the source trial portfolio, stores raw API pulls for provenance, and flattens study and site records into reusable state-level structures.
+
+
+```{python}
+#| label: ctgov-version-check
+#| output: false
+# Quick API version check for provenance tracking.
+version_url = "https://clinicaltrials.gov/api/v2/version"
+version_payload = request_json(version_url, timeout=30)
+save_json(RAW / "ct_version.json", version_payload)
+
+print("Saved:", RAW / "ct_version.json")
+print("Version payload keys:", list(version_payload.keys()))
+```
+
+```{python}
+#| label: ctgov-fetch-us-diabetes-studies
+#| output: false
+# Pull all US type 2 diabetes studies with cursor pagination.
+CT_STUDIES_URL = "https://clinicaltrials.gov/api/v2/studies"
+BASE_PARAMS = {
+    "query.cond": "type 2 diabetes",
+    "query.locn": "United States",
+    "pageSize": 1000,
+    "countTotal": "true",
+}
+
+next_page_token = None
+page_index = 0
+total_studies = 0
+
+while True:
+    page_params = dict(BASE_PARAMS)
+    if next_page_token:
+        page_params["pageToken"] = next_page_token
+
+    payload = request_json(CT_STUDIES_URL, params=page_params, timeout=60)
+    studies = payload.get("studies", [])
+
+    if not studies:
+        print("No studies returned; stopping.")
+        break
+
+    out_path = RAW / f"ct_diabetes_studies_page{page_index}.json"
+    save_json(out_path, payload)
+    total_studies += len(studies)
+    print(f"Saved page {page_index}: {len(studies)} studies -> {out_path.name}")
+
+    next_page_token = payload.get("nextPageToken")
+    if not next_page_token:
+        break
+
+    page_index += 1
+    time.sleep(REQUEST_PAUSE_SEC)
+
+print(f"Done. Total studies collected: {total_studies}")
+```
+
+```{python}
+#| label: ctgov-flatten-trials-and-sites
+page_files = sorted(RAW.glob("ct_diabetes_studies_page*.json"))
+if not page_files:
+    raise FileNotFoundError("No ClinicalTrials.gov page files found. Run the fetch cell first.")
+
+
+def extract_trial_and_site_rows(page_payload):
+    """Flatten one page into trial-level and site-level records."""
+    trial_rows = []
+    site_rows = []
+
+    for study in page_payload.get("studies", []):
+        protocol = study.get("protocolSection", {})
+        ident_mod = protocol.get("identificationModule", {})
+        status_mod = protocol.get("statusModule", {})
+        design_mod = protocol.get("designModule", {})
+        sponsor_mod = protocol.get("sponsorCollaboratorsModule", {})
+        contacts_mod = protocol.get("contactsLocationsModule", {})
+
+        nct_id = ident_mod.get("nctId")
+        if not nct_id:
+            continue
+
+        title = ident_mod.get("officialTitle") or ident_mod.get("briefTitle") or ""
+        lead_sponsor = sponsor_mod.get("leadSponsor", {}) if isinstance(sponsor_mod, dict) else {}
+        sponsor_class = str(lead_sponsor.get("class", "")).upper()
+
+        phases = design_mod.get("phases", [])
+        phase_text = ", ".join(phases) if isinstance(phases, list) else str(phases)
+
+        trial_rows.append(
+            {
+                "nct_id": nct_id,
+                "official_title": title,
+                "overall_status": status_mod.get("overallStatus"),
+                "phase": phase_text,
+                "lead_sponsor_class": sponsor_class,
+                "is_industry": 1 if sponsor_class == "INDUSTRY" else 0,
+            }
+        )
+
+        locations = contacts_mod.get("locations", []) if isinstance(contacts_mod, dict) else []
+        if not isinstance(locations, list):
+            locations = []
+
+        for location in locations:
+            country = str(location.get("country", "")).strip().upper()
+            if country and country not in {"UNITED STATES", "US", "USA"}:
+                continue
+
+            site_rows.append(
+                {
+                    "nct_id": nct_id,
+                    "state": normalize_state(location.get("state")),
+                    "state_raw": location.get("state"),
+                    "country": country,
+                    "facility": location.get("facility"),
+                    "city": location.get("city"),
+                }
+            )
+
+    return trial_rows, site_rows
+
+
+trial_rows = []
+site_rows = []
+for page_file in page_files:
+    payload = json.loads(page_file.read_text(encoding="utf-8"))
+    page_trial_rows, page_site_rows = extract_trial_and_site_rows(payload)
+    trial_rows.extend(page_trial_rows)
+    site_rows.extend(page_site_rows)
+
+# Trial table (one row per NCT ID)
+df_trials = pd.DataFrame(trial_rows).drop_duplicates(subset=["nct_id"]).copy()
+
+# Site table (one row per location entry)
+df_sites = pd.DataFrame(site_rows)
+df_sites_us = df_sites.dropna(subset=["nct_id", "state"]).copy()
+df_sites_us = df_sites_us[df_sites_us["state"].isin(US_STATE_ABBR)].copy()
+df_sites_unique = df_sites_us.drop_duplicates(subset=["nct_id", "state"]).copy()
+
+# State-level counts for report tables.
+state_trial_count = (
+    df_sites_unique.groupby("state", as_index=False)["nct_id"]
+    .nunique()
+    .rename(columns={"state": "stateabbr", "nct_id": "trial_count"})
+)
+state_site_count = (
+    df_sites_us.groupby("state", as_index=False)
+    .size()
+    .rename(columns={"state": "stateabbr", "size": "site_count"})
+)
+
+df_state_ct = (
+    pd.DataFrame({"stateabbr": sorted(US_STATE_ABBR)})
+    .merge(state_trial_count, on="stateabbr", how="left")
+    .merge(state_site_count, on="stateabbr", how="left")
+)
+for col in ["trial_count", "site_count"]:
+    df_state_ct[col] = df_state_ct[col].fillna(0).astype(int)
+
+# State-trial pairs used by sponsor/phase/status stratified summaries.
+df_trial_state = (
+    df_sites_unique.rename(columns={"state": "stateabbr"})[["nct_id", "stateabbr"]]
+    .drop_duplicates()
+    .merge(
+        df_trials[["nct_id", "is_industry", "lead_sponsor_class", "overall_status", "phase"]],
+        on="nct_id",
+        how="left",
+    )
+)
+df_trial_state["sponsor_group"] = np.where(df_trial_state["is_industry"] == 1, "INDUSTRY", "NON_INDUSTRY")
+df_trial_state["status_group"] = df_trial_state["overall_status"].fillna("UNKNOWN").astype(str).str.upper()
+df_trial_state["phase_group"] = df_trial_state["phase"].apply(phase_group)
+
+# Persist flattened outputs for reproducibility and downstream joins.
+df_trials.to_csv(TEMP / "ct_trials_flat.csv", index=False)
+df_sites_us.to_csv(TEMP / "ct_sites_flat.csv", index=False)
+df_state_ct.to_csv(TEMP / "ct_state_aggregates.csv", index=False)
+df_trial_state.to_csv(TEMP / "ct_trial_state_pairs.csv", index=False)
+
+print("Trials rows:", len(df_trials))
+print("US site rows:", len(df_sites_us))
+print("Unique state-trial pairs:", len(df_trial_state))
+print("Saved state aggregate:", TEMP / "ct_state_aggregates.csv")
+df_state_ct.head()
+```
+
+### Why This Step Matters
+
+This is the core study inventory used everywhere else in the report. It establishes the scale of the analysis and confirms that the downstream state and county summaries are built from a single reproducible trial-site pull rather than manually assembled subsets.
+
+
+## 2. Burden and Context Enrichment
+
+The notebook then joins the trial inventory to disease burden and contextual covariates. CDC PLACES supplies age-adjusted diabetes prevalence and related health access measures, ACS contributes socioeconomic variables, the Census adds rural population share, and Medicaid expansion is included as a policy context feature.
+
+
+```{python}
+#| label: cdc-places-state-pull
+#| output: false
+# Pull selected PLACES measures and aggregate county rows to state-level estimates.
+PLACES_MEASURES = [
+    "DIABETES", "ACCESS2", "LACKTRPT", "FOODINSECU", "HOUSINSECU",
+    "FOODSTAMP", "GHLTH", "BPHIGH", "OBESITY", "MHLTH", "DEPRESSION", "LPA", "LONELINESS",
+]
+
+CDC_PLACES_URL = "https://data.cdc.gov/resource/swc5-untb.json"
+measure_filter = ",".join(f"'{m}'" for m in PLACES_MEASURES)
+where_clause = f"measureid IN ({measure_filter}) AND datavaluetypeid='AgeAdjPrv'"
+
+cdc_rows = fetch_socrata_rows(
+    CDC_PLACES_URL,
+    where_clause=where_clause,
+    order_by="stateabbr,locationid,measureid,year",
+    limit=10_000,
+    timeout=60,
+    sleep_sec=REQUEST_PAUSE_SEC,
+)
+save_json(RAW / "cdc_places_multi_state.json", cdc_rows)
+
+if not cdc_rows:
+    raise ValueError("CDC PLACES API returned no rows.")
+
+df_cdc_all = pd.DataFrame(cdc_rows)
+df_cdc_all.columns = [c.lower() for c in df_cdc_all.columns]
+
+for col in ["year", "data_value", "low_confidence_limit", "high_confidence_limit", "totalpopulation", "totalpop18plus"]:
+    if col in df_cdc_all.columns:
+        df_cdc_all[col] = pd.to_numeric(df_cdc_all[col], errors="coerce")
+
+df_cdc_all["stateabbr"] = df_cdc_all["stateabbr"].astype(str).str.upper()
+df_cdc_all = df_cdc_all[df_cdc_all["stateabbr"].isin(US_STATE_ABBR)].copy()
+
+# Keep latest year for each county x measure, then aggregate county rows to state.
+df_latest_county = (
+    df_cdc_all.sort_values(["stateabbr", "locationid", "measureid", "year"])
+    .drop_duplicates(subset=["stateabbr", "locationid", "measureid"], keep="last")
+)
+
+# Use adult population when available; fallback to total population.
+df_latest_county["weight"] = df_latest_county["totalpop18plus"].where(
+    df_latest_county["totalpop18plus"] > 0,
+    df_latest_county["totalpopulation"],
+)
+
+
+def weighted_state_average(group):
+    vals = pd.to_numeric(group["data_value"], errors="coerce")
+    wts = pd.to_numeric(group["weight"], errors="coerce")
+    mask = vals.notna() & wts.notna() & (wts > 0)
+    if mask.any():
+        return np.average(vals[mask], weights=wts[mask])
+    return vals.mean(skipna=True)
+
+
+df_state_measure = (
+    df_latest_county.groupby(["stateabbr", "measureid"])
+    .apply(lambda g: weighted_state_average(g))
+    .reset_index(name="data_value")
+)
+
+# Build wide feature table.
+df_cdc_wide = (
+    df_state_measure.pivot(index="stateabbr", columns="measureid", values="data_value")
+    .reset_index()
+)
+df_cdc_wide.columns.name = None
+df_cdc_wide = df_cdc_wide.rename(columns={
+    c: f"places_{c.lower()}" for c in df_cdc_wide.columns if c != "stateabbr"
+})
+
+# Keep diabetes prevalence + aggregated CI columns for backward compatibility.
+diab_rows = df_latest_county[df_latest_county["measureid"] == "DIABETES"].copy()
+
+def weighted_col(group, col):
+    vals = pd.to_numeric(group[col], errors="coerce")
+    wts = pd.to_numeric(group["weight"], errors="coerce")
+    mask = vals.notna() & wts.notna() & (wts > 0)
+    if mask.any():
+        return np.average(vals[mask], weights=wts[mask])
+    return vals.mean(skipna=True)
+
+
+df_cdc_latest = (
+    diab_rows.groupby("stateabbr")
+    .apply(
+        lambda g: pd.Series(
+            {
+                "year": int(g["year"].max()) if g["year"].notna().any() else np.nan,
+                "diabetes_prevalence": weighted_col(g, "data_value"),
+                "diabetes_low_ci": weighted_col(g, "low_confidence_limit") if "low_confidence_limit" in g.columns else np.nan,
+                "diabetes_high_ci": weighted_col(g, "high_confidence_limit") if "high_confidence_limit" in g.columns else np.nan,
+            }
+        )
+    )
+    .reset_index()
+)
+
+# Persist both tables.
+df_cdc_latest.to_csv(TEMP / "cdc_diabetes_state_latest.csv", index=False)
+df_cdc_wide.to_csv(TEMP / "cdc_places_wide_state.csv", index=False)
+
+print("Measures fetched:", sorted(df_cdc_all["measureid"].dropna().unique().tolist()))
+print("CDC wide shape:", df_cdc_wide.shape)
+print("Saved:", TEMP / "cdc_diabetes_state_latest.csv")
+print("Saved:", TEMP / "cdc_places_wide_state.csv")
+df_cdc_latest.head()
+```
+
+```{python}
+#| label: acs-state-features
+#| output: false
+acs_url = "https://api.census.gov/data/2022/acs/acs5"
+acs_subj_url = "https://api.census.gov/data/2022/acs/acs5/subject"
+
+# ACS B-table variables (counts and universes used to build rates).
+acs_vars = [
+    "B01003_001E",  # total population
+    "B17001_001E",  # poverty universe
+    "B17001_002E",  # below poverty
+    "B19013_001E",  # median household income
+    "B19083_001E",  # gini coefficient
+    "B02001_003E",  # Black or African American population
+    "B02001_001E",  # race universe
+    "B03001_003E",  # Hispanic or Latino population
+    "B03001_001E",  # Hispanic universe
+    "B25044_003E",  # owner-occupied no vehicle
+    "B25044_010E",  # renter-occupied no vehicle
+    "B25044_001E",  # total occupied housing units
+    "B28002_013E",  # no internet subscription
+    "B28002_001E",  # internet universe
+    "B23025_005E",  # unemployed
+    "B23025_001E",  # labor universe
+]
+
+
+def fetch_acs_payload(base_url, variables, raw_filename):
+    params = {"get": ",".join(variables), "for": "state:*"}
+    if CENSUS_KEY:
+        params["key"] = CENSUS_KEY
+
+    payload = request_json(base_url, params=params, timeout=60)
+    save_json(RAW / raw_filename, payload)
+
+    if not payload or len(payload) < 2:
+        raise ValueError(f"ACS API returned empty payload for {raw_filename}")
+
+    return payload
+
+
+# Step 1: pull ACS B-table payload and derive core socioeconomic features.
+acs_payload = fetch_acs_payload(acs_url, acs_vars, "acs_state_2022.json")
+df_acs = pd.DataFrame(acs_payload[1:], columns=acs_payload[0])
+for col in acs_vars:
+    df_acs[col] = pd.to_numeric(df_acs[col], errors="coerce")
+
+df_acs["stateabbr"] = df_acs["state"].map(FIPS_TO_ABBR)
+df_acs["population"] = df_acs["B01003_001E"]
+df_acs["poverty_rate"] = safe_percent(df_acs["B17001_002E"], df_acs["B17001_001E"])
+df_acs["median_income"] = df_acs["B19013_001E"]
+df_acs["gini"] = df_acs["B19083_001E"]
+df_acs["pct_black"] = safe_percent(df_acs["B02001_003E"], df_acs["B02001_001E"])
+df_acs["pct_hispanic"] = safe_percent(df_acs["B03001_003E"], df_acs["B03001_001E"])
+df_acs["pct_no_vehicle"] = safe_percent(
+    df_acs["B25044_003E"] + df_acs["B25044_010E"],
+    df_acs["B25044_001E"],
+)
+df_acs["pct_no_internet"] = safe_percent(df_acs["B28002_013E"], df_acs["B28002_001E"])
+df_acs["unemployment_rate"] = safe_percent(df_acs["B23025_005E"], df_acs["B23025_001E"])
+
+# Step 2: pull ACS Subject tables for uninsured and education percentages.
+acs_subj_vars = [
+    "S2701_C05_001E",  # uninsured %
+    "S1501_C02_015E",  # bachelor's+ %
+]
+subj_payload = fetch_acs_payload(acs_subj_url, acs_subj_vars, "acs_state_2022_subject.json")
+df_subj = pd.DataFrame(subj_payload[1:], columns=subj_payload[0])
+df_subj["S2701_C05_001E"] = pd.to_numeric(df_subj["S2701_C05_001E"], errors="coerce")
+df_subj["S1501_C02_015E"] = pd.to_numeric(df_subj["S1501_C02_015E"], errors="coerce")
+df_subj["stateabbr"] = df_subj["state"].map(FIPS_TO_ABBR)
+df_subj = (
+    df_subj[["stateabbr", "S2701_C05_001E", "S1501_C02_015E"]]
+    .rename(columns={"S2701_C05_001E": "uninsured_pct", "S1501_C02_015E": "pct_bachelors_plus"})
+)
+
+# Step 3: combine all ACS-derived state features.
+acs_btable_cols = [
+    "stateabbr", "population", "poverty_rate", "median_income", "gini",
+    "pct_black", "pct_hispanic", "pct_no_vehicle", "pct_no_internet", "unemployment_rate",
+]
+df_acs_features = (
+    df_acs[acs_btable_cols]
+    .copy()
+    .query("stateabbr in @US_STATE_ABBR")
+    .merge(df_subj[df_subj["stateabbr"].isin(US_STATE_ABBR)], on="stateabbr", how="left")
+)
+
+df_acs_features.to_csv(TEMP / "acs_state_2022_features.csv", index=False)
+print("Saved ACS features:", TEMP / "acs_state_2022_features.csv")
+print("ACS shape:", df_acs_features.shape)
+df_acs_features.head()
+```
+
+```{python}
+#| label: rural-share-state
+#| output: false
+# Census 2020 Decennial P2 table: rural population share by state.
+dec_url = "https://api.census.gov/data/2020/dec/pl"
+dec_params = {"get": "P2_005N,P2_001N", "for": "state:*"}
+if CENSUS_KEY:
+    dec_params["key"] = CENSUS_KEY
+
+dec_payload = request_json(dec_url, params=dec_params, timeout=60)
+save_json(RAW / "decennial_2020_rural.json", dec_payload)
+
+if not dec_payload or len(dec_payload) < 2:
+    raise ValueError("Census Decennial P2 API returned empty payload.")
+
+df_dec = pd.DataFrame(dec_payload[1:], columns=dec_payload[0])
+df_dec["P2_005N"] = pd.to_numeric(df_dec["P2_005N"], errors="coerce")  # rural pop
+df_dec["P2_001N"] = pd.to_numeric(df_dec["P2_001N"], errors="coerce")  # total pop
+df_dec["stateabbr"] = df_dec["state"].map(FIPS_TO_ABBR)
+df_dec["pct_rural"] = safe_percent(df_dec["P2_005N"], df_dec["P2_001N"])
+
+df_rural = df_dec[["stateabbr", "pct_rural"]].copy()
+df_rural = df_rural[df_rural["stateabbr"].isin(US_STATE_ABBR)].copy()
+df_rural.to_csv(TEMP / "rural_pct_state_2020.csv", index=False)
+
+print("Saved rural pct:", TEMP / "rural_pct_state_2020.csv")
+print("Rural shape:", df_rural.shape)
+df_rural.sort_values("pct_rural", ascending=False).head(10)
+```
+
+```{python}
+#| label: medicaid-expansion-state
+#| output: false
+# Medicaid expansion status (as of Jan 2024)
+# Source: KFF State Health Facts — 40 states + DC = 41 have expanded; 10 have not.
+# Non-expansion states (10): AL, FL, GA, KS, MS, SC, TN, TX, WI, WY
+MEDICAID_NON_EXPANDED = {"AL", "FL", "GA", "KS", "MS", "SC", "TN", "TX", "WI", "WY"}
+
+df_medicaid = pd.DataFrame({"stateabbr": sorted(US_STATE_ABBR)})
+df_medicaid["medicaid_expanded"] = df_medicaid["stateabbr"].apply(
+    lambda s: 0 if s in MEDICAID_NON_EXPANDED else 1
+)
+df_medicaid.to_csv(TEMP / "medicaid_expansion_status.csv", index=False)
+
+print(f"Expansion states: {df_medicaid['medicaid_expanded'].sum()}")
+print(f"Non-expansion states: {(df_medicaid['medicaid_expanded'] == 0).sum()}")
+print("Saved:", TEMP / "medicaid_expansion_status.csv")
+df_medicaid[df_medicaid["medicaid_expanded"] == 0]
+```
+
+## 3. State Coverage Alignment and Exploratory Analysis
+
+This section assembles the main state table, computes trial density per 100k, and defines an empirical coverage residual as observed trial density minus the mean density within each diabetes-burden decile.
+
+
+```{python}
+#| label: state-coverage-alignment
+#| output: false
+# Assemble one row per state with trial burden, density, and socioeconomic context.
+df_final = (
+    pd.DataFrame({"stateabbr": sorted(US_STATE_ABBR)})
+    .merge(df_state_ct, on="stateabbr", how="left")
+    .merge(df_cdc_latest, on="stateabbr", how="left")
+    .merge(df_cdc_wide, on="stateabbr", how="left")
+    .merge(df_acs_features, on="stateabbr", how="left")
+    .merge(df_rural, on="stateabbr", how="left")
+    .merge(df_medicaid, on="stateabbr", how="left")
+)
+for col in ["trial_count", "site_count"]:
+    df_final[col] = df_final[col].fillna(0).astype(int)
+
+df_final["trials_per_100k"] = safe_rate_per_100k(df_final["trial_count"], df_final["population"])
+
+
+def build_state_density(df_pairs, group_col):
+    """Build state-level trial density table for one grouping variable."""
+    out = (
+        df_pairs.groupby(["stateabbr", group_col], as_index=False)["nct_id"]
+        .nunique()
+        .rename(columns={"nct_id": "trial_count"})
+    )
+    out = out.merge(df_acs_features[["stateabbr", "population"]], on="stateabbr", how="left")
+    out["trials_per_100k"] = safe_rate_per_100k(out["trial_count"], out["population"])
+    return out
+
+
+# Stratified density tables reused later in EDA and modeling exports.
+state_sponsor = build_state_density(df_trial_state, "sponsor_group")
+state_status = build_state_density(df_trial_state, "status_group")
+state_phase = build_state_density(df_trial_state, "phase_group")
+
+# Pull sponsor-specific trial counts into the main state table.
+sponsor_counts = (
+    state_sponsor.pivot_table(index="stateabbr", columns="sponsor_group", values="trial_count", aggfunc="first")
+    .rename(columns={"INDUSTRY": "industry_trial_count", "NON_INDUSTRY": "non_industry_trial_count"})
+    .reset_index()
+)
+for col in ["industry_trial_count", "non_industry_trial_count"]:
+    if col not in sponsor_counts.columns:
+        sponsor_counts[col] = 0
+
+df_final = df_final.merge(
+    sponsor_counts[["stateabbr", "industry_trial_count", "non_industry_trial_count"]],
+    on="stateabbr",
+    how="left",
+)
+for col in ["industry_trial_count", "non_industry_trial_count"]:
+    df_final[col] = df_final[col].fillna(0).astype(int)
+
+df_final["industry_trials_per_100k"] = safe_rate_per_100k(df_final["industry_trial_count"], df_final["population"])
+df_final["non_industry_trials_per_100k"] = safe_rate_per_100k(df_final["non_industry_trial_count"], df_final["population"])
+df_final["industry_pct"] = np.where(
+    df_final["trial_count"] > 0,
+    100.0 * df_final["industry_trial_count"] / df_final["trial_count"],
+    np.nan,
+)
+
+# Coverage residual = observed density - expected density within burden decile.
+df_final["burden_decile"] = pd.qcut(df_final["diabetes_prevalence"], q=10, labels=False, duplicates="drop")
+df_final["burden_decile"] = df_final["burden_decile"].astype("float") + 1.0
+df_final["expected_trials_per_100k"] = df_final.groupby("burden_decile")["trials_per_100k"].transform("mean")
+df_final["coverage_residual"] = df_final["trials_per_100k"] - df_final["expected_trials_per_100k"]
+
+resid_std = df_final["coverage_residual"].std(skipna=True)
+if resid_std and not np.isnan(resid_std) and resid_std > 0:
+    resid_mean = df_final["coverage_residual"].mean(skipna=True)
+    df_final["coverage_residual_z"] = (df_final["coverage_residual"] - resid_mean) / resid_std
+else:
+    df_final["coverage_residual_z"] = np.nan
+
+df_final["coverage_quartile"] = pd.qcut(
+    df_final["coverage_residual"],
+    q=4,
+    labels=["Q1_low", "Q2", "Q3", "Q4_high"],
+    duplicates="drop",
+)
+
+# Persist outputs reused by later sections.
+df_final.to_csv(TEMP / "state_coverage_alignment.csv", index=False)
+state_sponsor.to_csv(TEMP / "state_density_by_sponsor.csv", index=False)
+state_status.to_csv(TEMP / "state_density_by_status.csv", index=False)
+state_phase.to_csv(TEMP / "state_density_by_phase.csv", index=False)
+
+print(f"df_final shape: {df_final.shape}")
+print("Columns:", df_final.columns.tolist())
+print("Saved:", TEMP / "state_coverage_alignment.csv")
+
+df_final[["stateabbr", "trials_per_100k", "coverage_residual", "poverty_rate", "median_income",
+          "pct_black", "pct_hispanic", "pct_rural", "medicaid_expanded"]].sort_values("coverage_residual").head(10)
+```
+
+### SES Enrichment
+
+The next two chunks examine whether the coverage residual lines up with broader socioeconomic gradients. In practice, the associations are present but weak, which is useful context for the modeling phase.
+
+
+```{python}
+#| label: state-ses-correlation-heatmap
+# SES × coverage_residual correlation heatmap
+SES_COLS = [
+    # ACS variables
+    "poverty_rate", "median_income", "gini", "uninsured_pct", "pct_bachelors_plus",
+    "pct_black", "pct_hispanic", "pct_no_vehicle", "pct_no_internet", "unemployment_rate",
+    # Decennial
+    "pct_rural",
+    # Medicaid
+    "medicaid_expanded",
+    # CDC PLACES
+    "places_access2", "places_lacktrpt", "places_foodinsecu", "places_housinsecu",
+    "places_foodstamp", "places_bphigh", "places_obesity", "places_depression",
+    "places_mhlth", "places_ghlth", "places_lpa", "places_loneliness",
+    # Outcome
+    "coverage_residual",
+]
+
+# Keep only columns that actually exist in df_final
+ses_cols_present = [c for c in SES_COLS if c in df_final.columns]
+missing = [c for c in SES_COLS if c not in df_final.columns]
+if missing:
+    print("Warning — columns not found in df_final:", missing)
+
+df_corr = df_final[ses_cols_present].copy()
+corr_matrix = df_corr.corr()
+
+# Save correlation table
+corr_matrix.to_csv(TEMP / "ses_correlation_matrix.csv")
+print("Saved:", TEMP / "ses_correlation_matrix.csv")
+
+# Plot — sort columns/rows by correlation with coverage_residual
+if "coverage_residual" in corr_matrix.columns:
+    order = corr_matrix["coverage_residual"].drop("coverage_residual").sort_values().index.tolist()
+    order = order + ["coverage_residual"]
+    plot_corr = corr_matrix.loc[order, order]
+else:
+    plot_corr = corr_matrix
+
+fig, ax = plt.subplots(figsize=(16, 14))
+mask = np.zeros_like(plot_corr, dtype=bool)
+mask[np.triu_indices_from(mask, k=1)] = True  # upper triangle masked
+sns.heatmap(
+    plot_corr,
+    mask=mask,
+    annot=True,
+    fmt=".2f",
+    cmap="RdBu_r",
+    center=0,
+    vmin=-1,
+    vmax=1,
+    linewidths=0.4,
+    ax=ax,
+    annot_kws={"size": 7},
+)
+ax.set_title("SES × Coverage Residual — Pairwise Pearson Correlations (n=51 states)", fontsize=13)
+ax.tick_params(axis="x", rotation=60)
+ax.tick_params(axis="y", rotation=0)
+fig.tight_layout()
+fig.savefig(RESULTS / "ses_correlation_heatmap.png", dpi=200)
+plt.show()
+print("Saved figure:", RESULTS / "ses_correlation_heatmap.png")
+
+# Print top correlates with coverage_residual
+if "coverage_residual" in corr_matrix.columns:
+    top_corr = (
+        corr_matrix["coverage_residual"]
+        .drop("coverage_residual")
+        .sort_values(key=abs, ascending=False)
+    )
+    print("\nTop 10 correlates with coverage_residual:")
+    print(top_corr.head(10).to_string())
+```
+
+```{python}
+#| label: state-ses-pca-biplot
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+
+# PCA biplot of SES variables coloured by coverage_residual
+ses_feature_cols = [c for c in ses_cols_present if c != "coverage_residual"]
+df_pca_input = df_final[["stateabbr", "coverage_residual"] + ses_feature_cols].dropna()
+
+X = df_pca_input[ses_feature_cols].values
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+pca = PCA(n_components=2, random_state=42)
+scores = pca.fit_transform(X_scaled)
+loadings = pca.components_  # shape (2, n_features)
+
+explained = pca.explained_variance_ratio_
+
+df_scores = pd.DataFrame({
+    "stateabbr": df_pca_input["stateabbr"].values,
+    "PC1": scores[:, 0],
+    "PC2": scores[:, 1],
+    "coverage_residual": df_pca_input["coverage_residual"].values,
+})
+
+fig, ax = plt.subplots(figsize=(12, 9))
+
+sc = ax.scatter(
+    df_scores["PC1"],
+    df_scores["PC2"],
+    c=df_scores["coverage_residual"],
+    cmap="RdBu_r",
+    s=80,
+    edgecolors="white",
+    linewidths=0.5,
+    zorder=3,
+)
+
+for _, row in df_scores.iterrows():
+    ax.text(row["PC1"] + 0.06, row["PC2"] + 0.06, row["stateabbr"], fontsize=7, alpha=0.8)
+
+# Loading arrows (scaled for readability)
+scale = 3.5
+for i, feat in enumerate(ses_feature_cols):
+    lx, ly = loadings[0, i] * scale, loadings[1, i] * scale
+    ax.annotate(
+        "",
+        xy=(lx, ly),
+        xytext=(0, 0),
+        arrowprops=dict(arrowstyle="->", color="gray", lw=1.2),
+        zorder=2,
+    )
+    ax.text(lx * 1.08, ly * 1.08, feat, fontsize=7, color="dimgray")
+
+ax.axhline(0, color="lightgray", lw=0.8, zorder=1)
+ax.axvline(0, color="lightgray", lw=0.8, zorder=1)
+ax.set_xlabel(f"PC1 ({explained[0]:.1%} variance explained)")
+ax.set_ylabel(f"PC2 ({explained[1]:.1%} variance explained)")
+ax.set_title("PCA Biplot of SES Variables — States Coloured by Coverage Residual")
+
+cb = fig.colorbar(sc, ax=ax, fraction=0.035, pad=0.02)
+cb.set_label("coverage_residual")
+
+fig.tight_layout()
+fig.savefig(RESULTS / "ses_pca_biplot.png", dpi=200)
+plt.show()
+print("Saved figure:", RESULTS / "ses_pca_biplot.png")
+print(f"Variance explained: PC1={explained[0]:.1%}, PC2={explained[1]:.1%}")
+```
+
+### Portfolio Composition
+
+The following chunk profiles the national trial portfolio by sponsor type, recruitment status, and phase using the state-level tables.
+
+
+```{python}
+#| label: state-national-density-snapshots
+# National-level density snapshots by sponsor/phase/status from state tables.
+def national_density(df, group_col):
+    tmp = df.groupby(group_col, as_index=False).agg(
+        trial_count=("trial_count", "sum"),
+        population=("population", "sum"),
+    )
+    tmp["trials_per_100k"] = np.where(
+        tmp["population"] > 0,
+        tmp["trial_count"] / (tmp["population"] / 100000.0),
+        np.nan,
+    )
+    return tmp.sort_values("trials_per_100k", ascending=False)
+
+nat_sponsor = national_density(state_sponsor, "sponsor_group")
+nat_status = national_density(state_status, "status_group")
+nat_phase = national_density(state_phase, "phase_group")
+
+nat_sponsor.to_csv(TEMP / "national_density_by_sponsor.csv", index=False)
+nat_status.to_csv(TEMP / "national_density_by_status.csv", index=False)
+nat_phase.to_csv(TEMP / "national_density_by_phase.csv", index=False)
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+sns.barplot(data=nat_sponsor, x="sponsor_group", y="trials_per_100k", ax=axes[0], color="#3b82f6")
+axes[0].set_title("Sponsor Type")
+axes[0].set_xlabel("")
+axes[0].set_ylabel("Trials per 100k")
+
+status_top = nat_status.head(8)
+sns.barplot(data=status_top, x="status_group", y="trials_per_100k", ax=axes[1], color="#10b981")
+axes[1].set_title("Status (Top 8)")
+axes[1].set_xlabel("")
+axes[1].set_ylabel("Trials per 100k")
+axes[1].tick_params(axis="x", rotation=70)
+
+phase_top = nat_phase.head(8)
+sns.barplot(data=phase_top, x="phase_group", y="trials_per_100k", ax=axes[2], color="#f59e0b")
+axes[2].set_title("Phase (Top 8)")
+axes[2].set_xlabel("")
+axes[2].set_ylabel("Trials per 100k")
+axes[2].tick_params(axis="x", rotation=70)
+
+fig.tight_layout()
+fig.savefig(RESULTS / "density_by_sponsor_phase_status.png", dpi=200)
+plt.show()
+print("Saved figure:", RESULTS / "density_by_sponsor_phase_status.png")
+```
+
+```{python}
+#| label: state-descriptive-table
+#| output: false
+df_desc = df_final.copy()
+
+def format_ci(row):
+    if pd.notna(row["diabetes_prevalence"]) and pd.notna(row["diabetes_low_ci"]) and pd.notna(row["diabetes_high_ci"]):
+        return f"{row['diabetes_prevalence']:.2f} ({row['diabetes_low_ci']:.2f}, {row['diabetes_high_ci']:.2f})"
+    if pd.notna(row["diabetes_prevalence"]):
+        return f"{row['diabetes_prevalence']:.2f}"
+    return np.nan
+
+df_desc["diabetes_prev_ci"] = df_desc.apply(format_ci, axis=1)
+
+under_states = set(df_desc.nsmallest(10, "coverage_residual")["stateabbr"])
+over_states = set(df_desc.nlargest(10, "coverage_residual")["stateabbr"])
+df_desc["coverage_flag"] = np.select(
+    [df_desc["stateabbr"].isin(under_states), df_desc["stateabbr"].isin(over_states)],
+    ["Top 10 under-covered", "Top 10 over-covered"],
+    default="",
+)
+
+display_cols = [
+    "stateabbr",
+    "diabetes_prev_ci",
+    "trial_count",
+    "site_count",
+    "trials_per_100k",
+    "expected_trials_per_100k",
+    "coverage_residual",
+    "industry_pct",
+    "coverage_flag",
+]
+
+df_desc_out = df_desc[display_cols].sort_values("coverage_residual")
+df_desc_out.to_csv(TEMP / "state_coverage_descriptive_table.csv", index=False)
+print("Saved:", TEMP / "state_coverage_descriptive_table.csv")
+df_desc_out.head(20)
+```
+
+### State Maps and Residual Patterns
+
+
+```{python}
+#| label: state-tile-maps
+tile_choropleth(
+    df_final,
+    value_col="diabetes_prevalence",
+    title="Map 1: Diabetes Age-Adjusted Prevalence (%)",
+    cmap_name="YlOrRd",
+    out_name="map_diabetes_prevalence_tile.png",
+)
+
+tile_choropleth(
+    df_final,
+    value_col="trials_per_100k",
+    title="Map 2: Trial Site Density (trials per 100k)",
+    cmap_name="Blues",
+    out_name="map_trial_density_tile.png",
+)
+
+tile_choropleth(
+    df_final,
+    value_col="coverage_residual",
+    title="Map 3: Coverage Residual (Observed - Expected Density)",
+    cmap_name="RdBu_r",
+    out_name="map_coverage_residual_tile.png",
+    vcenter=0.0,
+)
+```
+
+```{python}
+#| label: state-burden-density-scatterplots
+fig, ax = plt.subplots(figsize=(8, 6))
+scatter_df = df_final.dropna(subset=["diabetes_prevalence", "trials_per_100k"]).copy()
+sns.scatterplot(data=scatter_df, x="diabetes_prevalence", y="trials_per_100k", ax=ax, alpha=0.7)
+
+binned = (
+    scatter_df.dropna(subset=["burden_decile"])
+    .groupby("burden_decile", as_index=False)
+    .agg(
+        mean_prev=("diabetes_prevalence", "mean"),
+        mean_density=("trials_per_100k", "mean"),
+        mean_low_ci=("diabetes_low_ci", "mean"),
+        mean_high_ci=("diabetes_high_ci", "mean"),
+    )
+)
+
+xerr_left = np.clip(binned["mean_prev"] - binned["mean_low_ci"], a_min=0, a_max=None)
+xerr_right = np.clip(binned["mean_high_ci"] - binned["mean_prev"], a_min=0, a_max=None)
+
+ax.errorbar(
+    x=binned["mean_prev"],
+    y=binned["mean_density"],
+    xerr=[xerr_left, xerr_right],
+    fmt="o-",
+    color="black",
+    linewidth=1.5,
+    capsize=3,
+    label="Burden-decile means (+/- CDC CI avg)",
+)
+
+ax.set_title("Scatter A: Burden vs Trial Density")
+ax.set_xlabel("Diabetes prevalence (%)")
+ax.set_ylabel("Trials per 100k")
+ax.legend(loc="best")
+fig.tight_layout()
+fig.savefig(RESULTS / "scatter_burden_vs_density_binned.png", dpi=200)
+plt.show()
+print("Saved figure:", RESULTS / "scatter_burden_vs_density_binned.png")
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharex=True)
+sns.scatterplot(data=df_final, x="diabetes_prevalence", y="industry_trials_per_100k", ax=axes[0], alpha=0.7)
+sns.scatterplot(data=df_final, x="diabetes_prevalence", y="non_industry_trials_per_100k", ax=axes[1], alpha=0.7)
+
+axes[0].set_title("Industry trial density")
+axes[1].set_title("Non-industry trial density")
+axes[0].set_xlabel("Diabetes prevalence (%)")
+axes[1].set_xlabel("Diabetes prevalence (%)")
+axes[0].set_ylabel("Trials per 100k")
+axes[1].set_ylabel("Trials per 100k")
+
+fig.tight_layout()
+fig.savefig(RESULTS / "scatter_industry_vs_non_industry_density.png", dpi=200)
+plt.show()
+print("Saved figure:", RESULTS / "scatter_industry_vs_non_industry_density.png")
+```
+
+```{python}
+#| label: state-residual-outliers-and-topic-summary
+under = df_final.nsmallest(15, "coverage_residual").copy()
+over = df_final.nlargest(15, "coverage_residual").copy()
+
+fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+
+sns.barplot(data=under, x="stateabbr", y="coverage_residual", hue="industry_pct", palette="viridis", ax=axes[0], dodge=False)
+axes[0].set_title("Top 15 Under-covered States (negative residual)")
+axes[0].set_xlabel("State")
+axes[0].set_ylabel("Coverage residual")
+axes[0].legend(title="Industry %", bbox_to_anchor=(1.02, 1), loc="upper left")
+
+sns.barplot(data=over, x="stateabbr", y="coverage_residual", hue="industry_pct", palette="viridis", ax=axes[1], dodge=False)
+axes[1].set_title("Top 15 Over-covered States (positive residual)")
+axes[1].set_xlabel("State")
+axes[1].set_ylabel("Coverage residual")
+axes[1].legend(title="Industry %", bbox_to_anchor=(1.02, 1), loc="upper left")
+
+fig.tight_layout()
+fig.savefig(RESULTS / "coverage_residual_outlier_bars.png", dpi=200)
+plt.show()
+print("Saved figure:", RESULTS / "coverage_residual_outlier_bars.png")
+
+
+titles = df_trials["official_title"].fillna("").astype(str).str.strip()
+titles = titles[titles != ""]
+
+if len(titles) > 0:
+    tfidf = TfidfVectorizer(max_features=500, stop_words="english")
+    X = tfidf.fit_transform(titles)
+    terms = tfidf.get_feature_names_out()
+    mean_scores = np.asarray(X.mean(axis=0)).ravel()
+    df_tfidf = (
+        pd.DataFrame({"term": terms, "mean_tfidf": mean_scores})
+        .sort_values("mean_tfidf", ascending=False)
+        .head(30)
+        .reset_index(drop=True)
+    )
+else:
+    df_tfidf = pd.DataFrame(columns=["term", "mean_tfidf"])
+
+df_tfidf.to_csv(TEMP / "trial_title_tfidf_top_terms.csv", index=False)
+print("Saved:", TEMP / "trial_title_tfidf_top_terms.csv")
+
+def classify_trial(title):
+    t = str(title).lower()
+    if any(w in t for w in ["surgery", "bariatric", "transplant", "resection"]):
+        return "surgical"
+    if any(w in t for w in ["device", "monitor", "sensor", "pump", "wearable", "cgm"]):
+        return "device"
+    if any(w in t for w in ["lifestyle", "exercise", "diet", "nutrition", "education", "behavioral", "behaviour"]):
+        return "behavioral"
+    return "pharmacological"
+
+df_trials["trial_category"] = df_trials["official_title"].apply(classify_trial)
+
+df_topic_geo = df_trial_state.merge(
+    df_final[["stateabbr", "coverage_quartile"]],
+    on="stateabbr",
+    how="left",
+).merge(df_trials[["nct_id", "trial_category"]], on="nct_id", how="left")
+
+df_cat = (
+    df_topic_geo.dropna(subset=["coverage_quartile", "trial_category"])
+    .groupby(["coverage_quartile", "trial_category"], as_index=False)
+    .size()
+    .rename(columns={"size": "trial_state_pairs"})
+)
+
+df_cat.to_csv(TEMP / "trial_category_by_coverage_quartile.csv", index=False)
+print("Saved:", TEMP / "trial_category_by_coverage_quartile.csv")
+
+fig, ax = plt.subplots(figsize=(10, 6))
+sns.barplot(data=df_cat, x="trial_category", y="trial_state_pairs", hue="coverage_quartile", ax=ax)
+ax.set_title("Trial Categories by Coverage Residual Quartile")
+ax.set_xlabel("Trial category")
+ax.set_ylabel("Count of trial-state pairs")
+fig.tight_layout()
+fig.savefig(RESULTS / "trial_category_by_coverage_quartile_bar.png", dpi=200)
+plt.show()
+print("Saved figure:", RESULTS / "trial_category_by_coverage_quartile_bar.png")
+```
+
+### State Result Summary
+
+- The assembled state table contains 51 rows and 44 columns before the modeling extensions.
+- Mean state trial density is about 8.0 trials per 100k, but the spread is wide. The top density states include DC, Montana, Idaho, North Dakota, and Nebraska.
+- The strongest negative coverage residuals are in Wyoming (-8.58), Alaska (-7.66), and New Hampshire (-5.11). Large-population states such as California, Illinois, New Jersey, and New York also appear under-covered relative to their burden-decile benchmark.
+- The strongest positive residuals are in Idaho (+7.48), North Dakota (+6.57), DC (+6.43), and Nebraska (+6.19).
+- Industry dominates the observed portfolio. National density is roughly 5.39 trials per 100k for industry studies versus 0.78 for non-industry studies.
+- Phase structure is concentrated as well: completed studies dominate the status mix, and Phase 3 studies dominate the phase mix.
+- The SES enrichment step does not reveal a single strong state-level social explanation for the residual. The largest absolute correlation with `coverage_residual` is only about 0.22 in magnitude.
+
+
+### State Interpretation
+
+At the state level, trial access does not rise cleanly with diabetes burden. Instead, the portfolio looks lumpy and institution-driven. That matters for the next modeling phase because it argues against treating prevalence as the only meaningful predictor. Sponsor mix, provider supply, and institutional concentration should remain in scope.
+
+
+## 4. State Modeling Exports
+
+The original notebook extends the state feature set beyond the midterm EDA tables so that a richer modeling table is already available inside `product/data/modified/state_modeling_final.csv`.
+
+
+```{python}
+#| label: artifact-check
+#| output: false
+summary_paths = [
+    # Core trial/site data
+    TEMP / "ct_trials_flat.csv",
+    TEMP / "ct_sites_flat.csv",
+    TEMP / "ct_state_aggregates.csv",
+    TEMP / "ct_trial_state_pairs.csv",
+    # CDC PLACES
+    TEMP / "cdc_diabetes_state_latest.csv",
+    TEMP / "cdc_places_wide_state.csv",
+    # ACS & supplementary
+    TEMP / "acs_state_2022_features.csv",
+    TEMP / "rural_pct_state_2020.csv",
+    TEMP / "medicaid_expansion_status.csv",
+    # Master table
+    TEMP / "state_coverage_alignment.csv",
+    TEMP / "state_coverage_descriptive_table.csv",
+    # Stratified densities
+    TEMP / "state_density_by_sponsor.csv",
+    TEMP / "state_density_by_status.csv",
+    TEMP / "state_density_by_phase.csv",
+    TEMP / "national_density_by_sponsor.csv",
+    TEMP / "national_density_by_status.csv",
+    TEMP / "national_density_by_phase.csv",
+    # Text / category analysis
+    TEMP / "trial_title_tfidf_top_terms.csv",
+    TEMP / "trial_category_by_coverage_quartile.csv",
+    # SES analysis
+    TEMP / "ses_correlation_matrix.csv",
+    # Figures
+    RESULTS / "map_diabetes_prevalence_tile.png",
+    RESULTS / "map_trial_density_tile.png",
+    RESULTS / "map_coverage_residual_tile.png",
+    RESULTS / "density_by_sponsor_phase_status.png",
+    RESULTS / "scatter_burden_vs_density_binned.png",
+    RESULTS / "scatter_industry_vs_non_industry_density.png",
+    RESULTS / "coverage_residual_outlier_bars.png",
+    RESULTS / "trial_category_by_coverage_quartile_bar.png",
+    RESULTS / "ses_correlation_heatmap.png",
+    RESULTS / "ses_pca_biplot.png",
+]
+
+for p in summary_paths:
+    status = "OK" if p.exists() else "MISSING"
+    print(f"[{status}] {p}")
+```
+
+```{python}
+#| label: state-acs-full-feature-set
+#| output: false
+# 4-Ext-A: ACS 5-Year 2022 state-level feature set aligned to county schema.
+ACS_VARS_B = {
+    "B01003_001E": "pop_total",
+    "B17001_002E": "pop_poverty",
+    "B19013_001E": "median_hh_income",
+    "B19083_001E": "gini_index",
+    "B03002_003E": "pop_nhwhite",
+    "B03002_004E": "pop_nhblack",
+    "B03002_012E": "pop_hispanic",
+    "B25044_003E": "hh_no_vehicle_owned",
+    "B25044_001E": "hh_total",
+    "B28002_013E": "hh_no_internet",
+    "B23025_005E": "pop_unemployed",
+    "B23025_002E": "pop_labor_force",
+}
+ACS_VARS_S = {
+    "S2701_C05_001E": "pct_uninsured",
+    "S1501_C02_015E": "pct_bachelors_plus",
+}
+ACS_BASE = "https://api.census.gov/data/2022/acs/acs5"
+ACS_BASE_S = "https://api.census.gov/data/2022/acs/acs5/subject"
+
+
+def fetch_state_acs(var_map, base_url):
+    params = {
+        "get": ",".join(["NAME"] + list(var_map.keys())),
+        "for": "state:*",
+    }
+    if CENSUS_KEY:
+        params["key"] = CENSUS_KEY
+
+    rows = request_json(base_url, params=params, timeout=60)
+    if not rows or len(rows) < 2:
+        raise ValueError("ACS state request returned an empty payload.")
+
+    df = pd.DataFrame(rows[1:], columns=rows[0]).rename(columns=var_map)
+    df["stateabbr"] = df["state"].map(FIPS_TO_ABBR)
+
+    numeric_cols = list(var_map.values())
+    df[numeric_cols] = (
+        df[numeric_cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .replace(-666666666, np.nan)
+    )
+    return df.dropna(subset=["stateabbr"])
+
+
+print("Fetching state ACS B-tables ...")
+df_acs_st_b = fetch_state_acs(ACS_VARS_B, ACS_BASE)
+print(f"  B-table rows: {len(df_acs_st_b)}")
+
+print("Fetching state ACS S-tables ...")
+df_acs_st_s = fetch_state_acs(ACS_VARS_S, ACS_BASE_S)
+print(f"  S-table rows: {len(df_acs_st_s)}")
+
+df_acs_state = df_acs_st_b.merge(
+    df_acs_st_s[["stateabbr", "pct_uninsured", "pct_bachelors_plus"]],
+    on="stateabbr",
+    how="left",
+)
+
+df_acs_state["pct_poverty"] = safe_percent(df_acs_state["pop_poverty"], df_acs_state["pop_total"])
+df_acs_state["pct_nhwhite"] = safe_percent(df_acs_state["pop_nhwhite"], df_acs_state["pop_total"])
+df_acs_state["pct_nhblack"] = safe_percent(df_acs_state["pop_nhblack"], df_acs_state["pop_total"])
+df_acs_state["pct_hispanic"] = safe_percent(df_acs_state["pop_hispanic"], df_acs_state["pop_total"])
+df_acs_state["pct_no_vehicle"] = safe_percent(df_acs_state["hh_no_vehicle_owned"], df_acs_state["hh_total"])
+df_acs_state["pct_no_internet"] = safe_percent(df_acs_state["hh_no_internet"], df_acs_state["hh_total"])
+df_acs_state["pct_unemployed"] = safe_percent(df_acs_state["pop_unemployed"], df_acs_state["pop_labor_force"])
+
+df_acs_state.to_csv(TEMP / "acs_state_2022_full.csv", index=False)
+print(f"Saved: acs_state_2022_full.csv  ({len(df_acs_state)} rows x {len(df_acs_state.columns)} cols)")
+```
+
+```{python}
+#| label: state-cdc-places-wide-feature-set
+#| output: false
+# 4-Ext-B: CDC PLACES state features derived from county rows (2025 schema has no geographiclevel column).
+PLACES_URL = "https://data.cdc.gov/resource/swc5-untb.json"
+STATE_MEASURES = [
+    "DIABETES", "ACCESS2", "LACKTRPT", "FOODINSECU", "HOUSINSECU",
+    "FOODSTAMP", "GHLTH", "BPHIGH", "OBESITY", "MHLTH", "DEPRESSION", "LPA",
+    "KIDNEY", "STROKE", "CHD",
+]
+measure_str = ",".join(f"'{m}'" for m in STATE_MEASURES)
+
+places_rows = fetch_socrata_rows(
+    PLACES_URL,
+    where_clause=f"measureid IN ({measure_str}) AND datavaluetypeid='AgeAdjPrv'",
+    order_by="stateabbr,locationid,measureid,year",
+    limit=10_000,
+    timeout=60,
+    sleep_sec=REQUEST_PAUSE_SEC,
+)
+
+print(f"CDC PLACES rows pulled: {len(places_rows):,}")
+df_places = pd.DataFrame(places_rows)
+
+for col in ["year", "data_value", "totalpopulation", "totalpop18plus"]:
+    if col in df_places.columns:
+        df_places[col] = pd.to_numeric(df_places[col], errors="coerce")
+
+df_places["stateabbr"] = df_places["stateabbr"].astype(str).str.upper()
+df_places = df_places[df_places["stateabbr"].isin(US_STATE_ABBR)].copy()
+
+# Keep latest year per county x measure, then aggregate county values to state-level weighted means.
+df_places_latest = (
+    df_places.sort_values(["stateabbr", "locationid", "measureid", "year"])
+    .drop_duplicates(subset=["stateabbr", "locationid", "measureid"], keep="last")
+)
+df_places_latest["weight"] = df_places_latest["totalpop18plus"].where(
+    df_places_latest["totalpop18plus"] > 0,
+    df_places_latest["totalpopulation"],
+)
+
+
+def _weighted_mean(group):
+    vals = pd.to_numeric(group["data_value"], errors="coerce")
+    wts = pd.to_numeric(group["weight"], errors="coerce")
+    mask = vals.notna() & wts.notna() & (wts > 0)
+    if mask.any():
+        return np.average(vals[mask], weights=wts[mask])
+    return vals.mean(skipna=True)
+
+
+df_places_state_long = (
+    df_places_latest.groupby(["stateabbr", "measureid"])
+    .apply(lambda g: _weighted_mean(g))
+    .reset_index(name="data_value")
+)
+
+df_places_state = (
+    df_places_state_long.pivot(index="stateabbr", columns="measureid", values="data_value")
+    .reset_index()
+)
+df_places_state.columns.name = None
+df_places_state.columns = [
+    "stateabbr" if c == "stateabbr" else f"places_{c.lower()}"
+    for c in df_places_state.columns
+]
+
+df_places_state.to_csv(TEMP / "cdc_places_state_wide.csv", index=False)
+print(f"Saved: cdc_places_state_wide.csv  ({len(df_places_state)} states x {len(df_places_state.columns)} cols)")
+print("Measures:", [c for c in df_places_state.columns if c != "stateabbr"])
+```
+
+```{python}
+#| label: state-incidence-skip-note
+#| output: false
+# 4-Ext-C: State incidence intentionally excluded.
+# Reason: remove restricted-data dependency and keep pipeline fully reproducible
+# without authenticated CDC surveillance access.
+print("Skipping state diabetes incidence pull by design.")
+```
+
+```{python}
+#| label: state-infrastructure-features
+#| output: false
+
+# ── 4-Ext-D  NPI Endo Density + AMC Count — State Level ─────────────────────
+# Queries NPI Registry by state (no ZIP→FIPS crosswalk needed at state level).
+# Reuses the same taxonomy / keyword patterns as county cells 5-G and 5-H.
+
+NPI_URL       = "https://npiregistry.cms.hhs.gov/api/"
+ENDO_TAXONOMY = "Endocrinology, Diabetes & Metabolism"
+AMC_KEYWORDS  = ["university", "medical school", "medical college", "cancer center"]
+NPI_LIMIT     = 200
+MAX_SKIP      = 1200
+SLEEP_SEC     = 0.25
+
+CTSA_HUBS_FIPS = {
+    "01073","01089","04019","06037","06059","06073","06075","06085","06113",
+    "08031","09009","11001","12001","12057","12086","13121","15003",
+    "17019","17031","18097","19103","20091","21067","22033","22071",
+    "24031","24510","25017","25025","26161","27003","29189","31055",
+    "33015","34023","35001","36055","36061","37063","37067","37135",
+    "39035","39049","40109","41051","42003","42101","44007","45019",
+    "47037","48029","48113","49035","50007","51540","51760","53033","55025","55079",
+}
+# Map CTSA county FIPS → state FIPS (first 2 chars) → state abbr
+STATE_FIPS_TO_ABBR = {
+    "01":"AL","02":"AK","04":"AZ","05":"AR","06":"CA","08":"CO","09":"CT",
+    "10":"DE","11":"DC","12":"FL","13":"GA","15":"HI","16":"ID","17":"IL",
+    "18":"IN","19":"IA","20":"KS","21":"KY","22":"LA","23":"ME","24":"MD",
+    "25":"MA","26":"MI","27":"MN","28":"MS","29":"MO","30":"MT","31":"NE",
+    "32":"NV","33":"NH","34":"NJ","35":"NM","36":"NY","37":"NC","38":"ND",
+    "39":"OH","40":"OK","41":"OR","42":"PA","44":"RI","45":"SC","46":"SD",
+    "47":"TN","48":"TX","49":"UT","50":"VT","51":"VA","53":"WA","54":"WV",
+    "55":"WI","56":"WY",
+}
+CTSA_STATES = {STATE_FIPS_TO_ABBR[f[:2]] for f in CTSA_HUBS_FIPS if f[:2] in STATE_FIPS_TO_ABBR}
+
+# ── Endocrinologists ─────────────────────────────────────────────────────────
+endo_by_state = {}
+for state in sorted(US_STATE_ABBR):
+    count, skip = 0, 0
+    while skip <= MAX_SKIP:
+        params = {
+            "version": "2.1", "enumeration_type": "NPI-1",
+            "taxonomy_description": ENDO_TAXONOMY,
+            "state": state, "limit": NPI_LIMIT, "skip": skip,
+        }
+        r = requests.get(NPI_URL, params=params, timeout=60)
+        r.raise_for_status()
+        results = r.json().get("results", [])
+        count += len(results)
+        if not results or len(results) < NPI_LIMIT:
+            break
+        skip += NPI_LIMIT
+        time.sleep(SLEEP_SEC)
+    endo_by_state[state] = count
+
+df_endo_state = pd.DataFrame([
+    {"stateabbr": s, "endo_count": c} for s, c in endo_by_state.items()
+])
+print(f"Endocrinologists fetched: {df_endo_state['endo_count'].sum():,} across {len(df_endo_state)} states")
+
+# ── AMC orgs ─────────────────────────────────────────────────────────────────
+amc_by_state = {}
+for state in sorted(US_STATE_ABBR):
+    npis = set()
+    for kw in AMC_KEYWORDS:
+        skip = 0
+        while skip <= 400:
+            params = {
+                "version": "2.1", "enumeration_type": "NPI-2",
+                "organization_name": kw, "state": state, "limit": 200, "skip": skip,
+            }
+            r = requests.get(NPI_URL, params=params, timeout=60)
+            r.raise_for_status()
+            results = r.json().get("results", [])
+            npis.update(res.get("number") for res in results)
+            if not results or len(results) < 200:
+                break
+            skip += 200
+            time.sleep(SLEEP_SEC)
+    amc_by_state[state] = len(npis)
+
+df_amc_state = pd.DataFrame([
+    {"stateabbr": s, "amc_count": c, "has_ctsa": int(s in CTSA_STATES)}
+    for s, c in amc_by_state.items()
+])
+print(f"AMC NPI-2 orgs: {df_amc_state['amc_count'].sum():,} across {len(df_amc_state)} states")
+print(f"States with CTSA hub: {df_amc_state['has_ctsa'].sum()}")
+
+# ── Merge with ACS for per-100k rate ─────────────────────────────────────────
+df_acs_st = pd.read_csv(TEMP / "acs_state_2022_full.csv")
+df_npi_state = (
+    df_endo_state
+    .merge(df_amc_state, on="stateabbr", how="outer")
+    .merge(df_acs_st[["stateabbr", "pop_total"]], on="stateabbr", how="left")
+)
+df_npi_state["endo_per_100k"] = (
+    df_npi_state["endo_count"] / (df_npi_state["pop_total"].replace(0, float("nan")) / 100_000)
+)
+df_npi_state.to_csv(TEMP / "npi_state_infrastructure.csv", index=False)
+print(f"Saved: npi_state_infrastructure.csv  ({len(df_npi_state)} states)")
+```
+
+```{python}
+#| label: state-modeling-table
+#| output: false
+# State-Level Modeling Table (shared schema)
+# Produces state_modeling_final.csv with the same core columns as
+# county_modeling_final.csv so that both can be fed to the same model.
+#
+# Core shared columns (34):
+#   geo_id, geo_level, pop_total
+#   trials_per_100k, coverage_residual
+#   places_{15 measures}
+#   pct_poverty, median_hh_income, gini_index
+#   pct_nhblack, pct_hispanic, pct_no_vehicle, pct_no_internet,
+#   pct_unemployed, pct_uninsured, pct_bachelors_plus
+#   endo_per_100k, amc_count, has_ctsa
+#
+# State-only extra columns (kept at end):
+#   trial_count, site_count, industry_pct, mismatch_index,
+#   trials_100k_phase_*, trials_100k_sponsor_*, trials_100k_status_*
+
+df_agg = pd.read_csv(TEMP / "state_coverage_alignment.csv")
+df_acs = pd.read_csv(TEMP / "acs_state_2022_full.csv")
+df_places = pd.read_csv(TEMP / "cdc_places_state_wide.csv")
+df_npi = pd.read_csv(TEMP / "npi_state_infrastructure.csv")
+df_phase = pd.read_csv(TEMP / "state_density_by_phase.csv")
+df_spon = pd.read_csv(TEMP / "state_density_by_sponsor.csv")
+df_stat = pd.read_csv(TEMP / "state_density_by_status.csv")
+
+# Compute mismatch_index inline (burden rank - trial rank).
+_mm = df_agg[["stateabbr", "diabetes_prevalence", "trials_per_100k"]].copy()
+_mm["diabetes_prevalence"] = pd.to_numeric(_mm["diabetes_prevalence"], errors="coerce")
+_mm["trials_per_100k"] = pd.to_numeric(_mm["trials_per_100k"], errors="coerce")
+_mm["burden_rank"] = _mm["diabetes_prevalence"].rank(method="average", pct=True)
+_mm["trial_rank"] = _mm["trials_per_100k"].rank(method="average", pct=True)
+_mm["mismatch_index"] = _mm["burden_rank"] - _mm["trial_rank"]
+_mm["mismatch_quartile"] = pd.qcut(
+    _mm["mismatch_index"],
+    q=4,
+    labels=["Q1_well_served", "Q2", "Q3", "Q4_underserved"],
+    duplicates="drop",
+)
+df_mm = _mm[["stateabbr", "burden_rank", "trial_rank", "mismatch_index", "mismatch_quartile"]]
+
+acs_core = [
+    "stateabbr", "pop_total", "median_hh_income", "gini_index",
+    "pct_poverty", "pct_nhblack", "pct_hispanic", "pct_no_vehicle",
+    "pct_no_internet", "pct_unemployed", "pct_uninsured", "pct_bachelors_plus",
+]
+acs_core = [c for c in acs_core if c in df_acs.columns]
+
+mm_extra = [c for c in ["stateabbr", "mismatch_index", "mismatch_quartile", "burden_rank", "trial_rank"] if c in df_mm.columns]
+
+
+def _pivot_density(df, cat_col, prefix):
+    df = df.dropna(subset=[cat_col]).copy()
+    piv = df.pivot_table(index="stateabbr", columns=cat_col, values="trials_per_100k", aggfunc="first").reset_index()
+    piv.columns.name = None
+    piv.columns = [
+        "stateabbr" if c == "stateabbr" else f"{prefix}_{str(c).lower().replace(' ', '_').replace('/', '_')}"
+        for c in piv.columns
+    ]
+    return piv
+
+
+df_state_model = (
+    df_agg[["stateabbr", "trial_count", "site_count", "trials_per_100k", "coverage_residual", "industry_pct"]]
+    .merge(df_acs[acs_core], on="stateabbr", how="left")
+    .merge(df_places, on="stateabbr", how="left")
+    .merge(df_npi[["stateabbr", "endo_per_100k", "amc_count", "has_ctsa"]], on="stateabbr", how="left")
+    .merge(df_mm[mm_extra], on="stateabbr", how="left")
+    .merge(_pivot_density(df_phase, "phase_group", "trials_100k_phase"), on="stateabbr", how="left")
+    .merge(_pivot_density(df_spon, "sponsor_group", "trials_100k_sponsor"), on="stateabbr", how="left")
+    .merge(_pivot_density(df_stat, "status_group", "trials_100k_status"), on="stateabbr", how="left")
+)
+
+
+
+df_state_model.insert(0, "geo_level", "state")
+df_state_model.insert(0, "geo_id", df_state_model.pop("stateabbr"))
+
+print(f"State modeling table: {df_state_model.shape[0]} rows x {df_state_model.shape[1]} cols")
+null_pct = (df_state_model.isnull().mean() * 100).sort_values(ascending=False)
+print("Missing value rates (>0% only):")
+print(null_pct[null_pct > 0].round(1).to_string())
+
+df_state_model.to_csv(MOD / "state_modeling_final.csv", index=False)
+print("Saved: state_modeling_final.csv")
+```
+
+### State Modeling Readiness
+
+The state modeling export aligns the acquisition and EDA pipeline with downstream modeling needs by combining burden, SES, infrastructure, and stratified sponsor/phase/status features in one table. The current output contains 51 rows and 57 columns.
+
+
+## 5. County Extension
+
+The notebook already extends the analysis to counties, which is where access disparities become much more visible. The county workflow resolves site locations to county FIPS, estimates distance to the nearest trial site, enriches each county with ACS and PLACES variables, and builds a county-level table aligned to the same modeling schema used at the state level.
+
+
+```{python}
+#| label: county-city-to-fips-resolution
+#| output: false
+# 5-A: City -> County FIPS mapping.
+# Source strategy:
+#   1) Census Gazetteer 2022 for place centroid coordinates
+#   2) FCC Census API reverse geocoder (lat/lon -> county FIPS)
+#
+# The old Census place-county relationship URL used in prior versions now returns 404.
+
+import io
+import time
+import zipfile
+
+GAZ_URL = (
+    "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2022_Gazetteer/"
+    "2022_Gaz_place_national.zip"
+)
+FCC_URL = "https://geo.fcc.gov/api/census/block/find"
+
+
+def normalize_city(value):
+    city = (value or "").strip().lower()
+    for suffix in [" city", " town", " township", " village", " borough", " cdp"]:
+        city = city.removesuffix(suffix)
+    return city
+
+
+# Load trial sites first so we only resolve keys we actually need.
+ct_sites_flat = pd.read_csv(TEMP / "ct_sites_flat.csv", dtype=str)
+ct_sites_flat["city"] = ct_sites_flat["city"].fillna("").str.strip()
+ct_sites_flat["state"] = ct_sites_flat["state"].fillna("").str.strip().str.upper()
+ct_sites_flat["city_norm"] = ct_sites_flat["city"].apply(normalize_city)
+ct_sites_flat["lookup_key"] = ct_sites_flat["city_norm"] + "|" + ct_sites_flat["state"]
+needed_keys = set(ct_sites_flat["lookup_key"].dropna().unique())
+print(f"Unique city|state keys to resolve: {len(needed_keys):,}")
+
+print("Downloading Census 2022 Gazetteer of Places ...")
+gaz_resp = requests.get(GAZ_URL, timeout=120)
+gaz_resp.raise_for_status()
+with zipfile.ZipFile(io.BytesIO(gaz_resp.content)) as zf:
+    txt_name = [n for n in zf.namelist() if n.endswith(".txt")][0]
+    with zf.open(txt_name) as fh:
+        df_gaz = pd.read_csv(fh, sep="\t", dtype=str, encoding="latin-1")
+
+df_gaz.columns = df_gaz.columns.str.strip()
+df_gaz = df_gaz.rename(columns={
+    "USPS": "state_abbr",
+    "NAME": "place_name",
+    "GEOID": "place_geoid",
+    "INTPTLAT": "place_lat",
+    "INTPTLONG": "place_lon",
+})
+df_gaz = df_gaz[["state_abbr", "place_name", "place_geoid", "place_lat", "place_lon"]].copy()
+df_gaz["state_abbr"] = df_gaz["state_abbr"].str.strip().str.upper()
+df_gaz["place_name"] = df_gaz["place_name"].str.strip()
+df_gaz["place_geoid"] = df_gaz["place_geoid"].str.strip().str.zfill(7)
+df_gaz["place_lat"] = pd.to_numeric(df_gaz["place_lat"], errors="coerce")
+df_gaz["place_lon"] = pd.to_numeric(df_gaz["place_lon"], errors="coerce")
+df_gaz["city_norm"] = df_gaz["place_name"].apply(normalize_city)
+df_gaz["lookup_key"] = df_gaz["city_norm"] + "|" + df_gaz["state_abbr"]
+
+# Keep one candidate place row per lookup key (deterministic first after sorting).
+df_candidates = (
+    df_gaz[df_gaz["lookup_key"].isin(needed_keys)]
+    .sort_values(["lookup_key", "place_name", "place_geoid"])
+    .drop_duplicates(subset=["lookup_key"], keep="first")
+    .copy()
+)
+print(f"Candidate Gazetteer matches: {len(df_candidates):,}")
+
+
+session = requests.Session()
+
+
+def fcc_county_fips(lat, lon, max_retries=3):
+    if pd.isna(lat) or pd.isna(lon):
+        return None
+
+    params = {
+        "latitude": float(lat),
+        "longitude": float(lon),
+        "format": "json",
+    }
+
+    for attempt in range(max_retries):
+        try:
+            resp = session.get(FCC_URL, params=params, timeout=30)
+            resp.raise_for_status()
+            payload = resp.json()
+            county = payload.get("County", {}) if isinstance(payload, dict) else {}
+            fips = county.get("FIPS")
+            return str(fips).zfill(5) if fips else None
+        except Exception:
+            if attempt == max_retries - 1:
+                return None
+            time.sleep(0.5 * (attempt + 1))
+
+
+print("Resolving county FIPS from place centroids via FCC API ...")
+county_vals = []
+for i, row in enumerate(df_candidates.itertuples(index=False), start=1):
+    county_vals.append(fcc_county_fips(row.place_lat, row.place_lon))
+    if i % 200 == 0 or i == len(df_candidates):
+        print(f"  resolved {i:,}/{len(df_candidates):,}")
+    time.sleep(0.02)
+
+df_candidates["county_fips"] = county_vals
+
+# Build lookup dictionary used for joining onto trial sites.
+df_lookup = df_candidates[["lookup_key", "county_fips", "place_lat", "place_lon"]].copy()
+df_lookup = df_lookup.dropna(subset=["county_fips"]).drop_duplicates(subset=["lookup_key"], keep="first")
+LOOKUP = df_lookup.set_index("lookup_key")[["county_fips", "place_lat", "place_lon"]].to_dict("index")
+print(f"Lookup table size: {len(LOOKUP):,} city|state keys")
+
+# Join county FIPS onto trial sites.
+info = ct_sites_flat["lookup_key"].map(LOOKUP)
+ct_sites_flat = ct_sites_flat.copy()
+ct_sites_flat["county_fips"] = info.apply(lambda d: d.get("county_fips") if isinstance(d, dict) else None)
+ct_sites_flat["county_lat"] = info.apply(lambda d: d.get("place_lat") if isinstance(d, dict) else None)
+ct_sites_flat["county_lon"] = info.apply(lambda d: d.get("place_lon") if isinstance(d, dict) else None)
+
+n_total = len(ct_sites_flat)
+n_matched = ct_sites_flat["county_fips"].notna().sum()
+print(f"Sites matched: {n_matched:,}/{n_total:,} ({100 * n_matched / max(n_total, 1):.1f}%)")
+unmatched = ct_sites_flat[ct_sites_flat["county_fips"].isna()][["city", "state"]].drop_duplicates()
+print(f"Unique unmatched city+state pairs: {len(unmatched):,}")
+if len(unmatched) <= 20:
+    print(unmatched.to_string(index=False))
+
+ct_sites_flat.drop(columns=["city_norm"], inplace=True)
+ct_sites_flat.to_csv(TEMP / "ct_sites_county.csv", index=False)
+df_lookup.to_csv(RAW / "city_county_fips_lookup.csv", index=False)
+print("Saved: ct_sites_county.csv, city_county_fips_lookup.csv")
+```
+
+```{python}
+#| label: county-trial-site-aggregation
+#| output: false
+
+# ── 5-B  County Trial Site Aggregation ──────────────────────────────────────
+ct_county = pd.read_csv(TEMP / "ct_sites_county.csv", dtype=str)
+ct_county  = ct_county[ct_county["county_fips"].notna()].copy()
+
+county_agg = (
+    ct_county.groupby("county_fips")
+    .agg(
+        county_site_count=("county_fips", "count"),
+        county_trial_count=("nct_id", "nunique"),
+    )
+    .reset_index()
+)
+print(f"Counties with >=1 trial site: {len(county_agg):,}")
+print(county_agg[["county_site_count", "county_trial_count"]].describe())
+
+county_agg.to_csv(TEMP / "county_trial_aggregates.csv", index=False)
+print("Saved: county_trial_aggregates.csv")
+```
+
+```{python}
+#| label: county-nearest-site-distance
+#| output: false
+# 5-C: Distance to nearest trial site (Haversine proxy).
+# Source: Census 2020 county population centroids (no key required).
+# Note: straight-line distance is a travel-time proxy; road network effects are not captured.
+
+import io
+import numpy as np
+from scipy.spatial import cKDTree
+
+CENPOP_URL = (
+    "https://www2.census.gov/geo/docs/reference/cenpop2020/county/"
+    "CenPop2020_Mean_CO.txt"
+)
+
+print("Downloading Census 2020 county population centroids ...")
+cp_resp = requests.get(CENPOP_URL, timeout=60)
+cp_resp.raise_for_status()
+
+# Use utf-8-sig to strip BOM from the first header token (prevents STATEFP KeyError).
+df_cen = pd.read_csv(io.BytesIO(cp_resp.content), dtype=str, encoding="utf-8-sig")
+df_cen.columns = (
+    df_cen.columns.astype(str)
+    .str.replace("﻿", "", regex=False)
+    .str.strip()
+    .str.upper()
+)
+
+required_cols = ["STATEFP", "COUNTYFP", "LATITUDE", "LONGITUDE", "POPULATION"]
+missing_cols = [c for c in required_cols if c not in df_cen.columns]
+if missing_cols:
+    raise KeyError(f"Missing expected centroid columns: {missing_cols}; available={list(df_cen.columns)}")
+
+df_cen["county_fips"] = df_cen["STATEFP"].str.zfill(2) + df_cen["COUNTYFP"].str.zfill(3)
+df_cen["lat"] = pd.to_numeric(df_cen["LATITUDE"], errors="coerce")
+df_cen["lon"] = pd.to_numeric(df_cen["LONGITUDE"], errors="coerce")
+df_cen["pop"] = pd.to_numeric(df_cen["POPULATION"], errors="coerce")
+df_cen = df_cen[["county_fips", "lat", "lon", "pop"]].dropna()
+print(f"County centroids loaded: {len(df_cen):,}")
+
+county_agg = pd.read_csv(TEMP / "county_trial_aggregates.csv", dtype=str)
+county_agg["county_fips"] = county_agg["county_fips"].str.zfill(5)
+has_site = set(county_agg["county_fips"].unique())
+df_cen["has_trial_site"] = df_cen["county_fips"].isin(has_site)
+
+df_with = df_cen[df_cen["has_trial_site"]].copy()
+df_without = df_cen[~df_cen["has_trial_site"]].copy()
+print(f"Counties WITH sites: {len(df_with):,} | WITHOUT: {len(df_without):,}")
+
+EARTH_RADIUS_KM = 6371.0
+if df_with.empty:
+    raise ValueError("No counties with trial sites found; cannot compute nearest-site distances.")
+
+if df_without.empty:
+    df_with["dist_nearest_trial_km"] = 0.0
+    df_dist = df_with[["county_fips", "lat", "lon", "pop", "has_trial_site", "dist_nearest_trial_km"]].copy()
+else:
+    tree = cKDTree(np.radians(df_with[["lat", "lon"]].values))
+    dist_rad, _ = tree.query(np.radians(df_without[["lat", "lon"]].values), k=1)
+    df_without["dist_nearest_trial_km"] = dist_rad * EARTH_RADIUS_KM
+    df_with["dist_nearest_trial_km"] = 0.0
+    df_dist = pd.concat([df_with, df_without], ignore_index=True)[
+        ["county_fips", "lat", "lon", "pop", "has_trial_site", "dist_nearest_trial_km"]
+    ]
+
+df_dist.to_csv(TEMP / "county_distance_to_trial.csv", index=False)
+
+if not df_without.empty:
+    print(f"Median dist (no-site counties): {df_without['dist_nearest_trial_km'].median():.1f} km")
+    print(f"% counties > 100 km: {(df_without['dist_nearest_trial_km'] > 100).mean() * 100:.1f}%")
+    print(f"% counties > 200 km: {(df_without['dist_nearest_trial_km'] > 200).mean() * 100:.1f}%")
+print("Saved: county_distance_to_trial.csv")
+```
+
+```{python}
+#| label: county-acs-features
+#| output: false
+# 5-D: ACS 5-Year 2022 county-level feature set (same definitions as state-level cell 4-Ext-A).
+ACS_VARS_B = {
+    "B01003_001E": "pop_total",
+    "B17001_002E": "pop_poverty",
+    "B19013_001E": "median_hh_income",
+    "B19083_001E": "gini_index",
+    "B03002_003E": "pop_nhwhite",
+    "B03002_004E": "pop_nhblack",
+    "B03002_012E": "pop_hispanic",
+    "B25044_003E": "hh_no_vehicle_owned",
+    "B25044_001E": "hh_total",
+    "B28002_013E": "hh_no_internet",
+    "B23025_005E": "pop_unemployed",
+    "B23025_002E": "pop_labor_force",
+}
+ACS_VARS_S = {
+    "S2701_C05_001E": "pct_uninsured",
+    "S1501_C02_015E": "pct_bachelors_plus",
+}
+ACS_BASE = "https://api.census.gov/data/2022/acs/acs5"
+ACS_BASE_S = "https://api.census.gov/data/2022/acs/acs5/subject"
+
+
+def fetch_county_acs(var_map, base_url):
+    params = {
+        "get": ",".join(["NAME"] + list(var_map.keys())),
+        "for": "county:*",
+        "in": "state:*",
+    }
+    if CENSUS_KEY:
+        params["key"] = CENSUS_KEY
+
+    rows = request_json(base_url, params=params, timeout=120)
+    if not rows or len(rows) < 2:
+        raise ValueError("ACS county request returned an empty payload.")
+
+    df = pd.DataFrame(rows[1:], columns=rows[0]).rename(columns=var_map)
+    df["county_fips"] = df["state"].str.zfill(2) + df["county"].str.zfill(3)
+
+    numeric_cols = list(var_map.values())
+    df[numeric_cols] = (
+        df[numeric_cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .replace(-666666666, np.nan)
+    )
+    return df
+
+
+print("Fetching ACS B-tables for counties ...")
+df_acs_b = fetch_county_acs(ACS_VARS_B, ACS_BASE)
+print(f"  B-table rows: {len(df_acs_b):,}")
+
+print("Fetching ACS S-tables for counties ...")
+df_acs_s = fetch_county_acs(ACS_VARS_S, ACS_BASE_S)
+print(f"  S-table rows: {len(df_acs_s):,}")
+
+df_acs_county = df_acs_b.merge(
+    df_acs_s[["county_fips", "pct_uninsured", "pct_bachelors_plus"]],
+    on="county_fips",
+    how="left",
+)
+
+df_acs_county["pct_poverty"] = safe_percent(df_acs_county["pop_poverty"], df_acs_county["pop_total"])
+df_acs_county["pct_nhwhite"] = safe_percent(df_acs_county["pop_nhwhite"], df_acs_county["pop_total"])
+df_acs_county["pct_nhblack"] = safe_percent(df_acs_county["pop_nhblack"], df_acs_county["pop_total"])
+df_acs_county["pct_hispanic"] = safe_percent(df_acs_county["pop_hispanic"], df_acs_county["pop_total"])
+df_acs_county["pct_no_vehicle"] = safe_percent(df_acs_county["hh_no_vehicle_owned"], df_acs_county["hh_total"])
+df_acs_county["pct_no_internet"] = safe_percent(df_acs_county["hh_no_internet"], df_acs_county["hh_total"])
+df_acs_county["pct_unemployed"] = safe_percent(df_acs_county["pop_unemployed"], df_acs_county["pop_labor_force"])
+
+df_acs_county.to_csv(TEMP / "acs_county_2022_features.csv", index=False)
+print(f"Saved: acs_county_2022_features.csv  ({len(df_acs_county):,} rows)")
+```
+
+```{python}
+#| label: county-cdc-places-features
+#| output: false
+# 5-E: CDC PLACES county-level features (current schema does not expose geographiclevel column).
+PLACES_URL = "https://data.cdc.gov/resource/swc5-untb.json"
+COUNTY_MEASURES = [
+    "DIABETES", "ACCESS2", "LACKTRPT", "FOODINSECU", "HOUSINSECU",
+    "FOODSTAMP", "GHLTH", "BPHIGH", "OBESITY", "MHLTH", "DEPRESSION", "LPA",
+    "KIDNEY", "STROKE", "CHD",
+]
+measure_str = ",".join(f"'{m}'" for m in COUNTY_MEASURES)
+
+places_rows = fetch_socrata_rows(
+    PLACES_URL,
+    where_clause=f"measureid IN ({measure_str}) AND datavaluetypeid='AgeAdjPrv'",
+    order_by="stateabbr,locationid,measureid,year",
+    limit=10_000,
+    timeout=120,
+    sleep_sec=REQUEST_PAUSE_SEC,
+)
+print(f"Total CDC PLACES county rows: {len(places_rows):,}")
+
+df_places_long = pd.DataFrame(places_rows)
+df_places_long["data_value"] = pd.to_numeric(df_places_long.get("data_value"), errors="coerce")
+df_places_long["year"] = pd.to_numeric(df_places_long.get("year"), errors="coerce")
+df_places_long["locationid"] = df_places_long["locationid"].astype(str).str.zfill(5)
+
+# Keep latest year per county x measure.
+df_places_long = (
+    df_places_long.sort_values(["locationid", "measureid", "year"])
+    .drop_duplicates(subset=["locationid", "measureid"], keep="last")
+)
+
+df_places_county = (
+    df_places_long[["locationid", "measureid", "data_value"]]
+    .drop_duplicates(subset=["locationid", "measureid"])
+    .pivot(index="locationid", columns="measureid", values="data_value")
+    .reset_index()
+    .rename(columns={"locationid": "county_fips"})
+)
+df_places_county.columns.name = None
+df_places_county.columns = [
+    "county_fips" if c == "county_fips" else f"places_{c.lower()}"
+    for c in df_places_county.columns
+]
+
+df_places_county.to_csv(TEMP / "cdc_places_county_wide.csv", index=False)
+print(f"Saved: cdc_places_county_wide.csv  ({len(df_places_county):,} counties x {len(df_places_county.columns)} cols)")
+```
+
+```{python}
+#| label: county-incidence-skip-note
+#| output: false
+# 5-F: County incidence intentionally excluded.
+# Reason: remove restricted-data dependency and keep pipeline fully reproducible
+# without authenticated CDC surveillance access.
+print("Skipping county diabetes incidence pull by design.")
+```
+
+```{python}
+#| label: county-endocrinologist-density
+#| output: false
+
+# ── 5-G  Endocrinologist Density — NPI Registry ─────────────────────────────
+# Taxonomy: Endocrinology, Diabetes & Metabolism (207RE0101X)
+# Pagination: skip/limit=200, max_skip=1200 per state
+# ZIP2COUNTY dict built here; reused by Cell 5-H
+
+import io
+
+NPI_URL       = "https://npiregistry.cms.hhs.gov/api/"
+ENDO_TAXONOMY = "Endocrinology, Diabetes & Metabolism"
+NPI_LIMIT     = 200
+MAX_SKIP      = 1200
+SLEEP_SEC     = 0.25
+
+# ── ZCTA5 → county FIPS crosswalk ───────────────────────────────────────────
+ZCTA_URL = (
+    "https://www2.census.gov/geo/docs/maps-data/data/rel2020/zcta520/"
+    "tab20_zcta520_county20_natl.txt"
+)
+print("Downloading ZCTA5-to-county crosswalk ...")
+zc_resp = requests.get(ZCTA_URL, timeout=120)
+zc_resp.raise_for_status()
+df_zcta = pd.read_csv(io.StringIO(zc_resp.content.decode("latin-1")), sep="|", dtype=str)
+df_zcta.columns = df_zcta.columns.str.strip()
+df_zcta = df_zcta.rename(columns={"GEOID_ZCTA5_20": "zip5", "GEOID_COUNTY_20": "county_fips_full"})
+df_zcta["zip5"]        = df_zcta["zip5"].str.strip().str.zfill(5)
+df_zcta["county_fips"] = df_zcta["county_fips_full"].str.strip().str[:5]
+al_col = next((c for c in df_zcta.columns if "AREALAND" in c.upper()), None)
+df_zcta["arealand"] = pd.to_numeric(df_zcta[al_col], errors="coerce").fillna(0) if al_col else 0
+df_zcta_primary = (
+    df_zcta.sort_values("arealand", ascending=False)
+    .drop_duplicates(subset=["zip5"], keep="first")
+    [["zip5", "county_fips"]]
+)
+ZIP2COUNTY = df_zcta_primary.set_index("zip5")["county_fips"].to_dict()
+print(f"  ZCTA5 crosswalk: {len(ZIP2COUNTY):,} ZIPs mapped")
+
+# ── Fetch NPI endocrinologists ───────────────────────────────────────────────
+endo_records = []
+for state in sorted(US_STATE_ABBR):
+    skip = 0
+    while skip <= MAX_SKIP:
+        params = {
+            "version": "2.1",
+            "enumeration_type": "NPI-1",
+            "taxonomy_description": ENDO_TAXONOMY,
+            "state": state,
+            "limit": NPI_LIMIT,
+            "skip": skip,
+        }
+        r = requests.get(NPI_URL, params=params, timeout=60)
+        r.raise_for_status()
+        results = r.json().get("results", [])
+        if not results:
+            break
+        endo_records.extend(results)
+        if len(results) < NPI_LIMIT:
+            break
+        skip += NPI_LIMIT
+        time.sleep(SLEEP_SEC)
+print(f"Total endocrinologist NPI records: {len(endo_records):,}")
+
+def _get_zip(rec):
+    addrs = rec.get("addresses", [])
+    for a in addrs:
+        if a.get("address_purpose") == "LOCATION":
+            return str(a.get("postal_code", ""))[:5]
+    return str(addrs[0].get("postal_code", ""))[:5] if addrs else None
+
+df_endo = pd.DataFrame({
+    "npi":  [r.get("number") for r in endo_records],
+    "zip5": [_get_zip(r) for r in endo_records],
+})
+df_endo["county_fips"] = df_endo["zip5"].map(ZIP2COUNTY)
+df_endo_county = (
+    df_endo.dropna(subset=["county_fips"])
+    .groupby("county_fips")
+    .size()
+    .reset_index(name="endo_count")
+)
+print(f"  Counties with >=1 endocrinologist: {len(df_endo_county):,}")
+df_endo_county.to_csv(TEMP / "npi_endocrinologist_county.csv", index=False)
+print("Saved: npi_endocrinologist_county.csv")
+```
+
+```{python}
+#| label: county-amc-presence
+#| output: false
+
+# ── 5-H  Academic Medical Center (AMC) Presence ─────────────────────────────
+# Source 1: NPI-2 org search (keywords: university, medical school, etc.)
+# Source 2: Hardcoded CTSA hub county FIPS (NIH NCATS list)
+# Requires ZIP2COUNTY dict from Cell 5-G
+
+NPI_URL      = "https://npiregistry.cms.hhs.gov/api/"
+AMC_KEYWORDS = ["university", "medical school", "medical college", "cancer center"]
+AMC_SLEEP    = 0.25
+
+# CTSA hub county FIPS (hardcoded — one-off lookup from NIH NCATS hub list)
+CTSA_HUBS_FIPS = {
+    "01073", "01089", "04019", "06037", "06059", "06073", "06075", "06085", "06113",
+    "08031", "09009", "11001", "12001", "12057", "12086", "13121", "15003",
+    "17019", "17031", "18097", "19103", "20091", "21067", "22033", "22071",
+    "24031", "24510", "25017", "25025", "26161", "27003", "29189", "31055",
+    "33015", "34023", "35001", "36055", "36061", "37063", "37067", "37135",
+    "39035", "39049", "40109", "41051", "42003", "42101", "44007", "45019",
+    "47037", "48029", "48113", "49035", "50007", "51540", "51760", "53033", "55025", "55079",
+}
+
+# ── NPI-2 org search ─────────────────────────────────────────────────────────
+amc_records = []
+for state in sorted(US_STATE_ABBR):
+    for kw in AMC_KEYWORDS:
+        skip = 0
+        while skip <= 400:
+            params = {
+                "version": "2.1",
+                "enumeration_type": "NPI-2",
+                "organization_name": kw,
+                "state": state,
+                "limit": 200,
+                "skip": skip,
+            }
+            r = requests.get(NPI_URL, params=params, timeout=60)
+            r.raise_for_status()
+            results = r.json().get("results", [])
+            if not results:
+                break
+            amc_records.extend(results)
+            if len(results) < 200:
+                break
+            skip += 200
+            time.sleep(AMC_SLEEP)
+print(f"AMC NPI-2 records fetched: {len(amc_records):,}")
+
+def _extract_zip(rec):
+    addrs = rec.get("addresses", [])
+    for a in addrs:
+        if a.get("address_purpose") == "LOCATION":
+            return str(a.get("postal_code", ""))[:5]
+    return str(addrs[0].get("postal_code", ""))[:5] if addrs else None
+
+df_amc_raw = pd.DataFrame({
+    "npi":      [r.get("number") for r in amc_records],
+    "org_name": [r.get("basic", {}).get("organization_name", "") for r in amc_records],
+    "zip5":     [_extract_zip(r) for r in amc_records],
+}).drop_duplicates(subset=["npi"])
+df_amc_raw["county_fips"] = df_amc_raw["zip5"].map(ZIP2COUNTY)
+
+df_amc_county = (
+    df_amc_raw.dropna(subset=["county_fips"])
+    .groupby("county_fips")
+    .agg(amc_count=("npi", "nunique"))
+    .reset_index()
+)
+ctsa_df = pd.DataFrame({"county_fips": list(CTSA_HUBS_FIPS), "has_ctsa": 1})
+df_amc_county = (
+    df_amc_county.merge(ctsa_df, on="county_fips", how="outer")
+    .fillna({"amc_count": 0, "has_ctsa": 0})
+)
+df_amc_county["amc_count"] = df_amc_county["amc_count"].astype(int)
+df_amc_county["has_ctsa"]  = df_amc_county["has_ctsa"].astype(int)
+
+df_amc_county.to_csv(TEMP / "amc_presence_county.csv", index=False)
+print(f"Saved: amc_presence_county.csv  ({len(df_amc_county):,} counties)")
+print(f"  CTSA hub counties: {(df_amc_county['has_ctsa'] == 1).sum()}")
+```
+
+```{python}
+#| label: county-master-table
+#| output: false
+# 5-I  County Master Table Assembly
+
+def _load(fname):
+    return pd.read_csv(TEMP / fname, dtype={"county_fips": str})
+
+
+df_dist = _load("county_distance_to_trial.csv")
+df_trial_agg = _load("county_trial_aggregates.csv")
+df_acs = _load("acs_county_2022_features.csv")
+df_places = _load("cdc_places_county_wide.csv")
+df_endo = _load("npi_endocrinologist_county.csv")
+df_amc = _load("amc_presence_county.csv")
+
+for df in [df_dist, df_trial_agg, df_acs, df_places, df_endo, df_amc]:
+    df["county_fips"] = df["county_fips"].astype(str).str.zfill(5)
+
+acs_keep = [c for c in [
+    "county_fips", "pop_total", "median_hh_income", "gini_index",
+    "pct_poverty", "pct_nhwhite", "pct_nhblack", "pct_hispanic",
+    "pct_no_vehicle", "pct_no_internet", "pct_unemployed",
+    "pct_uninsured", "pct_bachelors_plus",
+] if c in df_acs.columns]
+
+df_county = (
+    pd.DataFrame({"county_fips": df_dist["county_fips"].unique()})
+    .merge(df_dist, on="county_fips", how="left")
+    .merge(df_trial_agg, on="county_fips", how="left")
+    .merge(df_acs[acs_keep], on="county_fips", how="left")
+    .merge(df_places, on="county_fips", how="left")
+    .merge(df_endo[["county_fips", "endo_count"]], on="county_fips", how="left")
+    .merge(df_amc[["county_fips", "amc_count", "has_ctsa"]], on="county_fips", how="left")
+)
+
+for col in ["county_site_count", "county_trial_count", "endo_count", "amc_count", "has_ctsa"]:
+    if col in df_county.columns:
+        df_county[col] = df_county[col].fillna(0).astype(int)
+
+pop_safe = df_county["pop_total"].replace(0, float("nan"))
+df_county["trials_per_100k"] = df_county["county_trial_count"] / (pop_safe / 100_000)
+df_county["endo_per_100k"] = df_county["endo_count"] / (pop_safe / 100_000)
+
+if "places_diabetes" in df_county.columns:
+    df_county["burden_decile"] = pd.qcut(
+        df_county["places_diabetes"].rank(method="first", na_option="bottom"),
+        q=10,
+        labels=False,
+    )
+    expected = df_county.groupby("burden_decile")["trials_per_100k"].transform("median")
+    df_county["coverage_residual"] = df_county["trials_per_100k"] - expected
+
+print(f"County master table: {len(df_county):,} rows x {len(df_county.columns)} columns")
+print(f"  % with trial site: {(df_county['county_trial_count'] > 0).mean() * 100:.1f}%")
+if "places_diabetes" in df_county.columns:
+    print(f"  PLACES diabetes coverage:  {df_county['places_diabetes'].notna().mean() * 100:.1f}%")
+print(f"  Endo density (any county): {(df_county['endo_per_100k'] > 0).mean() * 100:.1f}%")
+
+df_county.to_csv(TEMP / "county_coverage_alignment.csv", index=False)
+print("Saved: county_coverage_alignment.csv")
+```
+
+```{python}
+#| label: county-eda-figures
+# 5-J: County EDA figures.
+df_c = pd.read_csv(TEMP / "county_coverage_alignment.csv", dtype={"county_fips": str})
+
+# Normalize has_trial_site to boolean for robust filtering across saved dtypes.
+has_site_bool = (
+    df_c["has_trial_site"].astype(str).str.lower().isin({"true", "1", "yes"})
+    if "has_trial_site" in df_c.columns
+    else pd.Series(False, index=df_c.index)
+)
+
+# 5-J-1: Distance histogram for counties that do not host a trial site.
+fig, ax = plt.subplots(figsize=(9, 4))
+no_site = df_c[~has_site_bool]
+ax.hist(no_site["dist_nearest_trial_km"].dropna(), bins=60, color="#1a6faf", edgecolor="none", alpha=0.85)
+ymax = ax.get_ylim()[1]
+for thresh, lbl in [(50, "50 km"), (100, "100 km"), (200, "200 km")]:
+    pct = (no_site["dist_nearest_trial_km"] > thresh).mean() * 100
+    ax.axvline(thresh, color="crimson", lw=1.4, ls="--")
+    ax.text(thresh + 2, ymax * 0.88, f">{lbl}\n{pct:.0f}%", color="crimson", fontsize=8)
+ax.set_xlabel("Distance to Nearest Trial Site (km)", fontsize=11)
+ax.set_ylabel("Number of Counties (no site)", fontsize=11)
+ax.set_title("Distance to Nearest Diabetes Trial Site (Counties Without a Site)", fontsize=12)
+sns.despine(ax=ax)
+plt.tight_layout()
+plt.savefig(RESULTS / "county_distance_histogram.png", dpi=150)
+plt.show()
+
+# 5-J-2: Distance vs diabetes prevalence.
+if "places_diabetes" in df_c.columns:
+    fig, ax = plt.subplots(figsize=(7, 5))
+    plot_df = df_c[["dist_nearest_trial_km", "places_diabetes"]].dropna()
+    ax.scatter(plot_df["places_diabetes"], plot_df["dist_nearest_trial_km"], alpha=0.15, s=8, color="#1a6faf")
+    m, b = np.polyfit(plot_df["places_diabetes"], plot_df["dist_nearest_trial_km"], 1)
+    xr = np.linspace(plot_df["places_diabetes"].min(), plot_df["places_diabetes"].max(), 100)
+    ax.plot(xr, m * xr + b, color="crimson", lw=1.5, label=f"OLS slope={m:.1f}")
+    ax.set_xlabel("Diabetes Prevalence (age-adj. %, CDC PLACES)", fontsize=11)
+    ax.set_ylabel("Distance to Nearest Trial Site (km)", fontsize=11)
+    ax.set_title("High-Burden Counties Farther from Trials?", fontsize=12)
+    ax.legend(fontsize=9)
+    sns.despine(ax=ax)
+    plt.tight_layout()
+    plt.savefig(RESULTS / "county_distance_vs_diabetes.png", dpi=150)
+    plt.show()
+
+# 5-J-3: Endocrinologist density vs trial density.
+fig, ax = plt.subplots(figsize=(7, 5))
+plot_df = df_c[["endo_per_100k", "trials_per_100k"]].dropna()
+plot_df = plot_df[(plot_df["endo_per_100k"] < 50) & (plot_df["trials_per_100k"] < 200)]
+if len(plot_df) > 10:
+    ax.scatter(plot_df["endo_per_100k"], plot_df["trials_per_100k"], alpha=0.15, s=8, color="#2ca02c")
+    m, b = np.polyfit(plot_df["endo_per_100k"], plot_df["trials_per_100k"], 1)
+    xr = np.linspace(0, plot_df["endo_per_100k"].quantile(0.99), 100)
+    ax.plot(xr, m * xr + b, color="crimson", lw=1.5, label=f"OLS slope={m:.2f}")
+    ax.set_xlabel("Endocrinologists per 100k Population", fontsize=11)
+    ax.set_ylabel("Trials per 100k Population", fontsize=11)
+    ax.set_title("Trial Gravity Around Endocrinologists?", fontsize=12)
+    ax.legend(fontsize=9)
+    sns.despine(ax=ax)
+    plt.tight_layout()
+    plt.savefig(RESULTS / "county_endo_vs_trials.png", dpi=150)
+    plt.show()
+
+# 5-J-4: AMC count vs trial density.
+fig, ax = plt.subplots(figsize=(7, 5))
+plot_df = df_c[["amc_count", "trials_per_100k"]].dropna()
+plot_df = plot_df[plot_df["trials_per_100k"] < 200].copy()
+plot_df["amc_cap"] = plot_df["amc_count"].clip(upper=10)
+ax.scatter(plot_df["amc_cap"], plot_df["trials_per_100k"], alpha=0.15, s=8, color="#9467bd")
+medians = plot_df.groupby("amc_cap")["trials_per_100k"].median()
+ax.plot(medians.index, medians.values, color="crimson", lw=2, marker="o", ms=5, label="Median trials/100k")
+ax.set_xlabel("AMC NPI-2 Org Count per County (capped at 10)", fontsize=11)
+ax.set_ylabel("Trials per 100k Population", fontsize=11)
+ax.set_title("AMC Gravity Effect on Trial Density", fontsize=12)
+ax.legend(fontsize=9)
+sns.despine(ax=ax)
+plt.tight_layout()
+plt.savefig(RESULTS / "county_amc_vs_trials.png", dpi=150)
+plt.show()
+
+# 5-J-5: County-level correlation heatmap.
+hm_candidates = [
+    "trials_per_100k", "dist_nearest_trial_km", "places_diabetes",
+    "endo_per_100k", "amc_count",
+    "pct_poverty", "median_hh_income", "pct_uninsured", "pct_no_vehicle",
+    "pct_no_internet", "pct_nhblack", "pct_hispanic",
+    "places_obesity", "places_bphigh", "places_kidney", "places_stroke", "places_chd",
+]
+hm_vars = [v for v in hm_candidates if v in df_c.columns]
+corr_mat = df_c[hm_vars].corr()
+fig, ax = plt.subplots(figsize=(13, 11))
+sns.heatmap(
+    corr_mat,
+    annot=True,
+    fmt=".2f",
+    cmap="RdBu_r",
+    center=0,
+    linewidths=0.3,
+    square=True,
+    ax=ax,
+    annot_kws={"size": 6},
+)
+ax.set_title(f"County-Level Correlation Heatmap (n={len(df_c):,})", fontsize=13)
+plt.tight_layout()
+plt.savefig(RESULTS / "county_correlation_heatmap.png", dpi=150)
+plt.show()
+print("Saved: county_correlation_heatmap.png")
+
+# 5-J-6: Aggregate county distance to a state-level tile map.
+df_state_dist = (
+    df_c.assign(state_fips=df_c["county_fips"].str[:2])
+    .groupby("state_fips")["dist_nearest_trial_km"]
+    .mean()
+    .reset_index(name="mean_dist_km")
+)
+df_state_dist["stateabbr"] = df_state_dist["state_fips"].map(FIPS_TO_ABBR)
+df_state_dist = df_state_dist.dropna(subset=["stateabbr"])
+
+tile_choropleth(
+    df_state_dist,
+    value_col="mean_dist_km",
+    title="Mean Distance to Nearest Trial Site by State (km)",
+    cmap_name="YlOrRd",
+    out_name="state_tile_mean_distance.png",
+)
+
+print("\nSection 5 county-level EDA complete.")
+print(f"All figures saved to: {RESULTS}")
+```
+
+```{python}
+#| label: county-modeling-table
+#| output: false
+# County-Level Modeling Table (shared schema)
+# Selects and renames columns from county_coverage_alignment.csv so that the
+# core columns match state_modeling_final.csv exactly.
+#
+# Shared core columns (present in both tables):
+#   geo_id, geo_level, pop_total
+#   trials_per_100k, coverage_residual
+#   places_{15 measures}
+#   pct_poverty, median_hh_income, gini_index
+#   pct_nhblack, pct_hispanic, pct_no_vehicle, pct_no_internet,
+#   pct_unemployed, pct_uninsured, pct_bachelors_plus
+#   endo_per_100k, amc_count, has_ctsa
+#
+# County-only columns (kept at end, NaN in state table):
+#   dist_nearest_trial_km, has_trial_site, county_trial_count
+
+SHARED_CORE = [
+    "geo_id", "geo_level", "pop_total",
+    "trials_per_100k", "coverage_residual",
+    # CDC PLACES - 15 measures
+    "places_access2", "places_bphigh", "places_chd", "places_depression",
+    "places_diabetes", "places_foodinsecu", "places_foodstamp", "places_ghlth",
+    "places_housinsecu", "places_kidney", "places_lacktrpt", "places_lpa",
+    "places_mhlth", "places_obesity", "places_stroke",
+    # ACS
+    "pct_poverty", "median_hh_income", "gini_index",
+    "pct_nhblack", "pct_hispanic", "pct_no_vehicle", "pct_no_internet",
+    "pct_unemployed", "pct_uninsured", "pct_bachelors_plus",
+    # Infrastructure
+    "endo_per_100k", "amc_count", "has_ctsa",
+]
+
+df_cty = pd.read_csv(TEMP / "county_coverage_alignment.csv", dtype={"county_fips": str})
+df_cty["county_fips"] = df_cty["county_fips"].str.zfill(5)
+
+df_cty = df_cty.rename(columns={"county_fips": "geo_id"})
+df_cty.insert(1, "geo_level", "county")
+
+county_extra = ["dist_nearest_trial_km", "has_trial_site", "county_trial_count", "county_site_count", "burden_decile"]
+county_extra = [c for c in county_extra if c in df_cty.columns]
+
+present_core = [c for c in SHARED_CORE if c in df_cty.columns]
+missing_core = [c for c in SHARED_CORE if c not in df_cty.columns]
+remaining_cols = [c for c in df_cty.columns if c not in present_core + county_extra]
+
+df_county_model = df_cty[present_core + county_extra + remaining_cols].copy()
+
+print(f"County modeling table: {df_county_model.shape[0]:,} rows x {df_county_model.shape[1]} cols")
+if missing_core:
+    print(f"  WARNING: {len(missing_core)} shared-core cols missing (Section 5 not yet run?):")
+    print(f"    {missing_core}")
+
+null_pct = (df_county_model.isnull().mean() * 100).sort_values(ascending=False)
+print("Missing value rates (>5% only):")
+print(null_pct[null_pct > 5].round(1).to_string() or "  none")
+
+state_cols = list(pd.read_csv(MOD / "state_modeling_final.csv", nrows=0).columns)
+shared_in_both = [c for c in SHARED_CORE if c in state_cols and c in df_county_model.columns]
+print(f"Shared core columns confirmed in both tables: {len(shared_in_both)}/{len(SHARED_CORE)}")
+only_state = [c for c in state_cols if c not in df_county_model.columns]
+only_county = [c for c in df_county_model.columns if c not in state_cols]
+print(f"State-only columns  ({len(only_state)}):  {only_state}")
+print(f"County-only columns ({len(only_county)}): {only_county}")
+
+df_county_model.to_csv(MOD / "county_modeling_final.csv", index=False)
+print("Saved: county_modeling_final.csv")
+```
+
+### County Result Summary
+
+- 41,917 of 47,118 site rows were matched to counties, an 89.0% match rate.
+- Only 862 counties have at least one trial site, meaning 26.8% of counties host a site in the final county table.
+- Among counties without a trial site, the notebook reports a median nearest-site distance of 58.8 km, with 24.1% more than 100 km away and 8.2% more than 200 km away.
+- The county table contains 3,221 rows and 41 columns before the final modeling-table reshaping step.
+- Endocrinologist presence is sparse at the county level, and the observed association with trial density is positive but weak.
+- Distance to the nearest site does not increase in any simple linear way with diabetes burden. The county plots point more strongly to infrastructure and geographic concentration than to burden alone.
+
+
+### County Interpretation
+
+The county extension is the strongest evidence in the current report that trial access is uneven in a practical, geographic sense. State averages can hide these access frictions. County-level site absence and distance reveal a much more tangible barrier structure, which is likely to be more informative for the next modeling stage than state-only residuals.
+
+
+## 6. Caveats and Reporting Notes
+
+- `coverage_residual` is a descriptive benchmark, not a causal estimate.
+- Two states, Kentucky and Pennsylvania, are missing state-level PLACES burden in the assembled state coverage table.
+- County matching is incomplete: 458 city-state pairs remain unmatched after Gazetteer and FCC resolution.
+- Distance is a Haversine straight-line proxy, not road travel time.
+- County outputs include Puerto Rico county-equivalent FIPS codes, so future modeling should decide explicitly whether to keep or exclude them.
+- AMC and CTSA infrastructure proxies are approximate and should be interpreted cautiously.
+- The county modeling table is intentionally aligned to the state schema, but the notebook reports one missing shared-core field: `places_kidney`.
+
+
+## 7. Ready for Modeling
+
+This QMD now contains the completed acquisition and EDA pipeline from the notebook in a report-ready format. The next step can focus directly on modeling inside this document, using `product/data/modified/state_modeling_final.csv` and `product/data/modified/county_modeling_final.csv` as the current model-ready starting points.

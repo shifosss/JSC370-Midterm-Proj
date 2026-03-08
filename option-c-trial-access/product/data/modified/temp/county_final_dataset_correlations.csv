@@ -1,0 +1,9 @@
+feature,correlation
+endo_per_100k,0.177
+pct_bachelors_plus,0.164
+has_ctsa,0.143
+pct_nhblack,0.132
+endo_count,0.126
+pop_total,0.118
+pop,0.118
+pct_no_internet,-0.107
