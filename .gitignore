@@ -224,6 +224,7 @@ __marimo__/
 */.quarto/
 */product/*_files/
 */product/*.html
+!option-c-trial-access/product/option-c.html
 
 # R
 .Rhistory
