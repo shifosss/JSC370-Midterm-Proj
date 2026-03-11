@@ -2,8 +2,8 @@ feature,correlation
 pop_total,-0.324
 places_foodstamp,-0.175
 pct_poverty,0.139
-pct_nhblack,0.128
-places_stroke,0.119
-pct_uninsured,-0.115
+pct_nhblack,0.127
+places_stroke,0.12
+pct_uninsured,-0.114
 median_hh_income,-0.103
-places_housinsecu,-0.102
+places_housinsecu,-0.103

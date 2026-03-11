@@ -1,6 +1,6 @@
 ---
 title: "Option C - Clinical Trial Access Gap for Type 2 Diabetes"
-subtitle: "Notebook transcription, exploratory results, and model-ready data products"
+subtitle: "Analysis, exploratory results, and model-ready data products"
 author: ""
 date: today
 format:
@@ -18,10 +18,9 @@ execute:
   message: false
 ---
 
-
 ## Overview
 
-This report is the production Quarto transcription of the completed notebook at `discover/data_acquiring/api_call_data_grabbing.ipynb`. It preserves the notebook code, reproduces the full acquisition and exploratory workflow, and brings the results into a cleaner report structure that is ready for the next modeling phase.
+This report consolidates the `option-c.ipynb` workflow into Quarto format while preserving the notebook code and analytic sequence.
 
 The current scope is U.S. Type 2 diabetes clinical trial access. The workflow links ClinicalTrials.gov site data with CDC PLACES burden measures, ACS socioeconomic context, rurality, Medicaid expansion status, and infrastructure proxies such as endocrinologist density and academic medical center presence.
 
@@ -29,7 +28,6 @@ Supporting data dictionaries:
 
 - [State-level data documentation](../discover/State_level_data_documentation.md)
 - [County-level data documentation](../discover/County_level_data_documentation.md)
-
 
 ### Executive Summary
 
@@ -39,16 +37,13 @@ Supporting data dictionaries:
 - County access gaps are sharper than state summaries suggest. Only 26.8% of counties host a trial site, and among counties without a site the median distance to the nearest site is 58.8 km; 24.1% are more than 100 km away.
 - The exploratory results suggest that access behaves more like an infrastructure concentration problem than a burden-matching problem. SES correlates with the state coverage residual are weak, and county distance patterns appear more related to place and service availability than to burden alone.
 
-
 ### Interpretation Before Modeling
 
 The descriptive evidence already points to a useful modeling frame. Disease burden alone does not explain where trial sites cluster. Industry sponsorship, provider concentration, and institutional infrastructure appear to matter at least as much, and probably more, than prevalence itself. The state residuals and county distance measures should therefore be treated as baseline descriptive targets for the next phase rather than as causal effects.
 
-
 ## Reproducibility Setup
 
 The notebook code uses paths relative to `discover/data_acquiring/`. The hidden setup chunk below preserves that execution context so the original code can run from `product/option-c.qmd` without altering the notebook cells themselves.
-
 
 ```{python}
 #| label: execution-context
@@ -78,7 +73,25 @@ import json
 import os
 import pathlib
 import re
+import sys
 import time
+
+# Ensure Windows Jupyter sessions launched from an unactivated conda kernel
+# can still find this env's BLAS/DLL dependencies before NumPy imports.
+# if os.name == "nt":
+#     env_root = pathlib.Path(sys.executable).resolve().parent
+#     dll_dirs = [
+#         env_root,
+#         env_root / "Library" / "bin",
+#         env_root / "Scripts",
+#         env_root / "DLLs",
+#     ]
+#     for dll_dir in dll_dirs:
+#         if not dll_dir.exists():
+#             continue
+#         os.environ["PATH"] = f"{dll_dir};{os.environ.get('PATH', '')}"
+#         if hasattr(os, "add_dll_directory"):
+#             os.add_dll_directory(str(dll_dir))
 
 import numpy as np
 import pandas as pd
@@ -254,7 +267,6 @@ print("Census API key present:", bool(CENSUS_KEY))
 ## 1. ClinicalTrials.gov Acquisition and Flattening
 
 This section captures the source trial portfolio, stores raw API pulls for provenance, and flattens study and site records into reusable state-level structures.
-
 
 ```{python}
 #| label: ctgov-version-check
@@ -440,15 +452,9 @@ print("Saved state aggregate:", TEMP / "ct_state_aggregates.csv")
 df_state_ct.head()
 ```
 
-### Why This Step Matters
-
-This is the core study inventory used everywhere else in the report. It establishes the scale of the analysis and confirms that the downstream state and county summaries are built from a single reproducible trial-site pull rather than manually assembled subsets.
-
-
 ## 2. Burden and Context Enrichment
 
-The notebook then joins the trial inventory to disease burden and contextual covariates. CDC PLACES supplies age-adjusted diabetes prevalence and related health access measures, ACS contributes socioeconomic variables, the Census adds rural population share, and Medicaid expansion is included as a policy context feature.
-
+The trial inventory is joined to disease burden and contextual covariates using CDC PLACES, ACS, Census rurality, and Medicaid expansion status.
 
 ```{python}
 #| label: cdc-places-state-pull
@@ -706,10 +712,9 @@ print("Saved:", TEMP / "medicaid_expansion_status.csv")
 df_medicaid[df_medicaid["medicaid_expanded"] == 0]
 ```
 
-## 3. State Coverage Alignment and Exploratory Analysis
+## 3. State Coverage Alignment Assembly
 
-This section assembles the main state table, computes trial density per 100k, and defines an empirical coverage residual as observed trial density minus the mean density within each diabetes-burden decile.
-
+This section assembles the state-level coverage table and the intermediate density tables used later in the final modeling export. The exploratory analysis is deferred until the two final modeling datasets have been written.
 
 ```{python}
 #| label: state-coverage-alignment
@@ -807,445 +812,6 @@ df_final[["stateabbr", "trials_per_100k", "coverage_residual", "poverty_rate", "
           "pct_black", "pct_hispanic", "pct_rural", "medicaid_expanded"]].sort_values("coverage_residual").head(10)
 ```
 
-### SES Enrichment
-
-The next two chunks examine whether the coverage residual lines up with broader socioeconomic gradients. In practice, the associations are present but weak, which is useful context for the modeling phase.
-
-
-```{python}
-#| label: state-ses-correlation-heatmap
-# SES × coverage_residual correlation heatmap
-SES_COLS = [
-    # ACS variables
-    "poverty_rate", "median_income", "gini", "uninsured_pct", "pct_bachelors_plus",
-    "pct_black", "pct_hispanic", "pct_no_vehicle", "pct_no_internet", "unemployment_rate",
-    # Decennial
-    "pct_rural",
-    # Medicaid
-    "medicaid_expanded",
-    # CDC PLACES
-    "places_access2", "places_lacktrpt", "places_foodinsecu", "places_housinsecu",
-    "places_foodstamp", "places_bphigh", "places_obesity", "places_depression",
-    "places_mhlth", "places_ghlth", "places_lpa", "places_loneliness",
-    # Outcome
-    "coverage_residual",
-]
-
-# Keep only columns that actually exist in df_final
-ses_cols_present = [c for c in SES_COLS if c in df_final.columns]
-missing = [c for c in SES_COLS if c not in df_final.columns]
-if missing:
-    print("Warning — columns not found in df_final:", missing)
-
-df_corr = df_final[ses_cols_present].copy()
-corr_matrix = df_corr.corr()
-
-# Save correlation table
-corr_matrix.to_csv(TEMP / "ses_correlation_matrix.csv")
-print("Saved:", TEMP / "ses_correlation_matrix.csv")
-
-# Plot — sort columns/rows by correlation with coverage_residual
-if "coverage_residual" in corr_matrix.columns:
-    order = corr_matrix["coverage_residual"].drop("coverage_residual").sort_values().index.tolist()
-    order = order + ["coverage_residual"]
-    plot_corr = corr_matrix.loc[order, order]
-else:
-    plot_corr = corr_matrix
-
-fig, ax = plt.subplots(figsize=(16, 14))
-mask = np.zeros_like(plot_corr, dtype=bool)
-mask[np.triu_indices_from(mask, k=1)] = True  # upper triangle masked
-sns.heatmap(
-    plot_corr,
-    mask=mask,
-    annot=True,
-    fmt=".2f",
-    cmap="RdBu_r",
-    center=0,
-    vmin=-1,
-    vmax=1,
-    linewidths=0.4,
-    ax=ax,
-    annot_kws={"size": 7},
-)
-ax.set_title("SES × Coverage Residual — Pairwise Pearson Correlations (n=51 states)", fontsize=13)
-ax.tick_params(axis="x", rotation=60)
-ax.tick_params(axis="y", rotation=0)
-fig.tight_layout()
-fig.savefig(RESULTS / "ses_correlation_heatmap.png", dpi=200)
-plt.show()
-print("Saved figure:", RESULTS / "ses_correlation_heatmap.png")
-
-# Print top correlates with coverage_residual
-if "coverage_residual" in corr_matrix.columns:
-    top_corr = (
-        corr_matrix["coverage_residual"]
-        .drop("coverage_residual")
-        .sort_values(key=abs, ascending=False)
-    )
-    print("\nTop 10 correlates with coverage_residual:")
-    print(top_corr.head(10).to_string())
-```
-
-```{python}
-#| label: state-ses-pca-biplot
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-
-# PCA biplot of SES variables coloured by coverage_residual
-ses_feature_cols = [c for c in ses_cols_present if c != "coverage_residual"]
-df_pca_input = df_final[["stateabbr", "coverage_residual"] + ses_feature_cols].dropna()
-
-X = df_pca_input[ses_feature_cols].values
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-pca = PCA(n_components=2, random_state=42)
-scores = pca.fit_transform(X_scaled)
-loadings = pca.components_  # shape (2, n_features)
-
-explained = pca.explained_variance_ratio_
-
-df_scores = pd.DataFrame({
-    "stateabbr": df_pca_input["stateabbr"].values,
-    "PC1": scores[:, 0],
-    "PC2": scores[:, 1],
-    "coverage_residual": df_pca_input["coverage_residual"].values,
-})
-
-fig, ax = plt.subplots(figsize=(12, 9))
-
-sc = ax.scatter(
-    df_scores["PC1"],
-    df_scores["PC2"],
-    c=df_scores["coverage_residual"],
-    cmap="RdBu_r",
-    s=80,
-    edgecolors="white",
-    linewidths=0.5,
-    zorder=3,
-)
-
-for _, row in df_scores.iterrows():
-    ax.text(row["PC1"] + 0.06, row["PC2"] + 0.06, row["stateabbr"], fontsize=7, alpha=0.8)
-
-# Loading arrows (scaled for readability)
-scale = 3.5
-for i, feat in enumerate(ses_feature_cols):
-    lx, ly = loadings[0, i] * scale, loadings[1, i] * scale
-    ax.annotate(
-        "",
-        xy=(lx, ly),
-        xytext=(0, 0),
-        arrowprops=dict(arrowstyle="->", color="gray", lw=1.2),
-        zorder=2,
-    )
-    ax.text(lx * 1.08, ly * 1.08, feat, fontsize=7, color="dimgray")
-
-ax.axhline(0, color="lightgray", lw=0.8, zorder=1)
-ax.axvline(0, color="lightgray", lw=0.8, zorder=1)
-ax.set_xlabel(f"PC1 ({explained[0]:.1%} variance explained)")
-ax.set_ylabel(f"PC2 ({explained[1]:.1%} variance explained)")
-ax.set_title("PCA Biplot of SES Variables — States Coloured by Coverage Residual")
-
-cb = fig.colorbar(sc, ax=ax, fraction=0.035, pad=0.02)
-cb.set_label("coverage_residual")
-
-fig.tight_layout()
-fig.savefig(RESULTS / "ses_pca_biplot.png", dpi=200)
-plt.show()
-print("Saved figure:", RESULTS / "ses_pca_biplot.png")
-print(f"Variance explained: PC1={explained[0]:.1%}, PC2={explained[1]:.1%}")
-```
-
-### Portfolio Composition
-
-The following chunk profiles the national trial portfolio by sponsor type, recruitment status, and phase using the state-level tables.
-
-
-```{python}
-#| label: state-national-density-snapshots
-# National-level density snapshots by sponsor/phase/status from state tables.
-def national_density(df, group_col):
-    tmp = df.groupby(group_col, as_index=False).agg(
-        trial_count=("trial_count", "sum"),
-        population=("population", "sum"),
-    )
-    tmp["trials_per_100k"] = np.where(
-        tmp["population"] > 0,
-        tmp["trial_count"] / (tmp["population"] / 100000.0),
-        np.nan,
-    )
-    return tmp.sort_values("trials_per_100k", ascending=False)
-
-nat_sponsor = national_density(state_sponsor, "sponsor_group")
-nat_status = national_density(state_status, "status_group")
-nat_phase = national_density(state_phase, "phase_group")
-
-nat_sponsor.to_csv(TEMP / "national_density_by_sponsor.csv", index=False)
-nat_status.to_csv(TEMP / "national_density_by_status.csv", index=False)
-nat_phase.to_csv(TEMP / "national_density_by_phase.csv", index=False)
-
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-sns.barplot(data=nat_sponsor, x="sponsor_group", y="trials_per_100k", ax=axes[0], color="#3b82f6")
-axes[0].set_title("Sponsor Type")
-axes[0].set_xlabel("")
-axes[0].set_ylabel("Trials per 100k")
-
-status_top = nat_status.head(8)
-sns.barplot(data=status_top, x="status_group", y="trials_per_100k", ax=axes[1], color="#10b981")
-axes[1].set_title("Status (Top 8)")
-axes[1].set_xlabel("")
-axes[1].set_ylabel("Trials per 100k")
-axes[1].tick_params(axis="x", rotation=70)
-
-phase_top = nat_phase.head(8)
-sns.barplot(data=phase_top, x="phase_group", y="trials_per_100k", ax=axes[2], color="#f59e0b")
-axes[2].set_title("Phase (Top 8)")
-axes[2].set_xlabel("")
-axes[2].set_ylabel("Trials per 100k")
-axes[2].tick_params(axis="x", rotation=70)
-
-fig.tight_layout()
-fig.savefig(RESULTS / "density_by_sponsor_phase_status.png", dpi=200)
-plt.show()
-print("Saved figure:", RESULTS / "density_by_sponsor_phase_status.png")
-```
-
-```{python}
-#| label: state-descriptive-table
-#| output: false
-df_desc = df_final.copy()
-
-def format_ci(row):
-    if pd.notna(row["diabetes_prevalence"]) and pd.notna(row["diabetes_low_ci"]) and pd.notna(row["diabetes_high_ci"]):
-        return f"{row['diabetes_prevalence']:.2f} ({row['diabetes_low_ci']:.2f}, {row['diabetes_high_ci']:.2f})"
-    if pd.notna(row["diabetes_prevalence"]):
-        return f"{row['diabetes_prevalence']:.2f}"
-    return np.nan
-
-df_desc["diabetes_prev_ci"] = df_desc.apply(format_ci, axis=1)
-
-under_states = set(df_desc.nsmallest(10, "coverage_residual")["stateabbr"])
-over_states = set(df_desc.nlargest(10, "coverage_residual")["stateabbr"])
-df_desc["coverage_flag"] = np.select(
-    [df_desc["stateabbr"].isin(under_states), df_desc["stateabbr"].isin(over_states)],
-    ["Top 10 under-covered", "Top 10 over-covered"],
-    default="",
-)
-
-display_cols = [
-    "stateabbr",
-    "diabetes_prev_ci",
-    "trial_count",
-    "site_count",
-    "trials_per_100k",
-    "expected_trials_per_100k",
-    "coverage_residual",
-    "industry_pct",
-    "coverage_flag",
-]
-
-df_desc_out = df_desc[display_cols].sort_values("coverage_residual")
-df_desc_out.to_csv(TEMP / "state_coverage_descriptive_table.csv", index=False)
-print("Saved:", TEMP / "state_coverage_descriptive_table.csv")
-df_desc_out.head(20)
-```
-
-### State Maps and Residual Patterns
-
-
-```{python}
-#| label: state-tile-maps
-tile_choropleth(
-    df_final,
-    value_col="diabetes_prevalence",
-    title="Map 1: Diabetes Age-Adjusted Prevalence (%)",
-    cmap_name="YlOrRd",
-    out_name="map_diabetes_prevalence_tile.png",
-)
-
-tile_choropleth(
-    df_final,
-    value_col="trials_per_100k",
-    title="Map 2: Trial Site Density (trials per 100k)",
-    cmap_name="Blues",
-    out_name="map_trial_density_tile.png",
-)
-
-tile_choropleth(
-    df_final,
-    value_col="coverage_residual",
-    title="Map 3: Coverage Residual (Observed - Expected Density)",
-    cmap_name="RdBu_r",
-    out_name="map_coverage_residual_tile.png",
-    vcenter=0.0,
-)
-```
-
-```{python}
-#| label: state-burden-density-scatterplots
-fig, ax = plt.subplots(figsize=(8, 6))
-scatter_df = df_final.dropna(subset=["diabetes_prevalence", "trials_per_100k"]).copy()
-sns.scatterplot(data=scatter_df, x="diabetes_prevalence", y="trials_per_100k", ax=ax, alpha=0.7)
-
-binned = (
-    scatter_df.dropna(subset=["burden_decile"])
-    .groupby("burden_decile", as_index=False)
-    .agg(
-        mean_prev=("diabetes_prevalence", "mean"),
-        mean_density=("trials_per_100k", "mean"),
-        mean_low_ci=("diabetes_low_ci", "mean"),
-        mean_high_ci=("diabetes_high_ci", "mean"),
-    )
-)
-
-xerr_left = np.clip(binned["mean_prev"] - binned["mean_low_ci"], a_min=0, a_max=None)
-xerr_right = np.clip(binned["mean_high_ci"] - binned["mean_prev"], a_min=0, a_max=None)
-
-ax.errorbar(
-    x=binned["mean_prev"],
-    y=binned["mean_density"],
-    xerr=[xerr_left, xerr_right],
-    fmt="o-",
-    color="black",
-    linewidth=1.5,
-    capsize=3,
-    label="Burden-decile means (+/- CDC CI avg)",
-)
-
-ax.set_title("Scatter A: Burden vs Trial Density")
-ax.set_xlabel("Diabetes prevalence (%)")
-ax.set_ylabel("Trials per 100k")
-ax.legend(loc="best")
-fig.tight_layout()
-fig.savefig(RESULTS / "scatter_burden_vs_density_binned.png", dpi=200)
-plt.show()
-print("Saved figure:", RESULTS / "scatter_burden_vs_density_binned.png")
-
-fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharex=True)
-sns.scatterplot(data=df_final, x="diabetes_prevalence", y="industry_trials_per_100k", ax=axes[0], alpha=0.7)
-sns.scatterplot(data=df_final, x="diabetes_prevalence", y="non_industry_trials_per_100k", ax=axes[1], alpha=0.7)
-
-axes[0].set_title("Industry trial density")
-axes[1].set_title("Non-industry trial density")
-axes[0].set_xlabel("Diabetes prevalence (%)")
-axes[1].set_xlabel("Diabetes prevalence (%)")
-axes[0].set_ylabel("Trials per 100k")
-axes[1].set_ylabel("Trials per 100k")
-
-fig.tight_layout()
-fig.savefig(RESULTS / "scatter_industry_vs_non_industry_density.png", dpi=200)
-plt.show()
-print("Saved figure:", RESULTS / "scatter_industry_vs_non_industry_density.png")
-```
-
-```{python}
-#| label: state-residual-outliers-and-topic-summary
-under = df_final.nsmallest(15, "coverage_residual").copy()
-over = df_final.nlargest(15, "coverage_residual").copy()
-
-fig, axes = plt.subplots(2, 1, figsize=(12, 10))
-
-sns.barplot(data=under, x="stateabbr", y="coverage_residual", hue="industry_pct", palette="viridis", ax=axes[0], dodge=False)
-axes[0].set_title("Top 15 Under-covered States (negative residual)")
-axes[0].set_xlabel("State")
-axes[0].set_ylabel("Coverage residual")
-axes[0].legend(title="Industry %", bbox_to_anchor=(1.02, 1), loc="upper left")
-
-sns.barplot(data=over, x="stateabbr", y="coverage_residual", hue="industry_pct", palette="viridis", ax=axes[1], dodge=False)
-axes[1].set_title("Top 15 Over-covered States (positive residual)")
-axes[1].set_xlabel("State")
-axes[1].set_ylabel("Coverage residual")
-axes[1].legend(title="Industry %", bbox_to_anchor=(1.02, 1), loc="upper left")
-
-fig.tight_layout()
-fig.savefig(RESULTS / "coverage_residual_outlier_bars.png", dpi=200)
-plt.show()
-print("Saved figure:", RESULTS / "coverage_residual_outlier_bars.png")
-
-
-titles = df_trials["official_title"].fillna("").astype(str).str.strip()
-titles = titles[titles != ""]
-
-if len(titles) > 0:
-    tfidf = TfidfVectorizer(max_features=500, stop_words="english")
-    X = tfidf.fit_transform(titles)
-    terms = tfidf.get_feature_names_out()
-    mean_scores = np.asarray(X.mean(axis=0)).ravel()
-    df_tfidf = (
-        pd.DataFrame({"term": terms, "mean_tfidf": mean_scores})
-        .sort_values("mean_tfidf", ascending=False)
-        .head(30)
-        .reset_index(drop=True)
-    )
-else:
-    df_tfidf = pd.DataFrame(columns=["term", "mean_tfidf"])
-
-df_tfidf.to_csv(TEMP / "trial_title_tfidf_top_terms.csv", index=False)
-print("Saved:", TEMP / "trial_title_tfidf_top_terms.csv")
-
-def classify_trial(title):
-    t = str(title).lower()
-    if any(w in t for w in ["surgery", "bariatric", "transplant", "resection"]):
-        return "surgical"
-    if any(w in t for w in ["device", "monitor", "sensor", "pump", "wearable", "cgm"]):
-        return "device"
-    if any(w in t for w in ["lifestyle", "exercise", "diet", "nutrition", "education", "behavioral", "behaviour"]):
-        return "behavioral"
-    return "pharmacological"
-
-df_trials["trial_category"] = df_trials["official_title"].apply(classify_trial)
-
-df_topic_geo = df_trial_state.merge(
-    df_final[["stateabbr", "coverage_quartile"]],
-    on="stateabbr",
-    how="left",
-).merge(df_trials[["nct_id", "trial_category"]], on="nct_id", how="left")
-
-df_cat = (
-    df_topic_geo.dropna(subset=["coverage_quartile", "trial_category"])
-    .groupby(["coverage_quartile", "trial_category"], as_index=False)
-    .size()
-    .rename(columns={"size": "trial_state_pairs"})
-)
-
-df_cat.to_csv(TEMP / "trial_category_by_coverage_quartile.csv", index=False)
-print("Saved:", TEMP / "trial_category_by_coverage_quartile.csv")
-
-fig, ax = plt.subplots(figsize=(10, 6))
-sns.barplot(data=df_cat, x="trial_category", y="trial_state_pairs", hue="coverage_quartile", ax=ax)
-ax.set_title("Trial Categories by Coverage Residual Quartile")
-ax.set_xlabel("Trial category")
-ax.set_ylabel("Count of trial-state pairs")
-fig.tight_layout()
-fig.savefig(RESULTS / "trial_category_by_coverage_quartile_bar.png", dpi=200)
-plt.show()
-print("Saved figure:", RESULTS / "trial_category_by_coverage_quartile_bar.png")
-```
-
-### State Result Summary
-
-- The assembled state table contains 51 rows and 44 columns before the modeling extensions.
-- Mean state trial density is about 8.0 trials per 100k, but the spread is wide. The top density states include DC, Montana, Idaho, North Dakota, and Nebraska.
-- The strongest negative coverage residuals are in Wyoming (-8.58), Alaska (-7.66), and New Hampshire (-5.11). Large-population states such as California, Illinois, New Jersey, and New York also appear under-covered relative to their burden-decile benchmark.
-- The strongest positive residuals are in Idaho (+7.48), North Dakota (+6.57), DC (+6.43), and Nebraska (+6.19).
-- Industry dominates the observed portfolio. National density is roughly 5.39 trials per 100k for industry studies versus 0.78 for non-industry studies.
-- Phase structure is concentrated as well: completed studies dominate the status mix, and Phase 3 studies dominate the phase mix.
-- The SES enrichment step does not reveal a single strong state-level social explanation for the residual. The largest absolute correlation with `coverage_residual` is only about 0.22 in magnitude.
-
-
-### State Interpretation
-
-At the state level, trial access does not rise cleanly with diabetes burden. Instead, the portfolio looks lumpy and institution-driven. That matters for the next modeling phase because it argues against treating prevalence as the only meaningful predictor. Sponsor mix, provider supply, and institutional concentration should remain in scope.
-
-
-## 4. State Modeling Exports
-
-The original notebook extends the state feature set beyond the midterm EDA tables so that a richer modeling table is already available inside `product/data/modified/state_modeling_final.csv`.
-
-
 ```{python}
 #| label: artifact-check
 #| output: false
@@ -1294,6 +860,10 @@ for p in summary_paths:
     status = "OK" if p.exists() else "MISSING"
     print(f"[{status}] {p}")
 ```
+
+## 4. State Modeling Exports
+
+These cells assemble the state-level modeling table used downstream in the final analytic and modeling workflow.
 
 ```{python}
 #| label: state-acs-full-feature-set
@@ -1573,7 +1143,7 @@ print(f"Saved: npi_state_infrastructure.csv  ({len(df_npi_state)} states)")
 #   endo_per_100k, amc_count, has_ctsa
 #
 # State-only extra columns (kept at end):
-#   trial_count, site_count, industry_pct, mismatch_index,
+#   trial_count, site_count, industry_pct,
 #   trials_100k_phase_*, trials_100k_sponsor_*, trials_100k_status_*
 
 df_agg = pd.read_csv(TEMP / "state_coverage_alignment.csv")
@@ -1584,29 +1154,12 @@ df_phase = pd.read_csv(TEMP / "state_density_by_phase.csv")
 df_spon = pd.read_csv(TEMP / "state_density_by_sponsor.csv")
 df_stat = pd.read_csv(TEMP / "state_density_by_status.csv")
 
-# Compute mismatch_index inline (burden rank - trial rank).
-_mm = df_agg[["stateabbr", "diabetes_prevalence", "trials_per_100k"]].copy()
-_mm["diabetes_prevalence"] = pd.to_numeric(_mm["diabetes_prevalence"], errors="coerce")
-_mm["trials_per_100k"] = pd.to_numeric(_mm["trials_per_100k"], errors="coerce")
-_mm["burden_rank"] = _mm["diabetes_prevalence"].rank(method="average", pct=True)
-_mm["trial_rank"] = _mm["trials_per_100k"].rank(method="average", pct=True)
-_mm["mismatch_index"] = _mm["burden_rank"] - _mm["trial_rank"]
-_mm["mismatch_quartile"] = pd.qcut(
-    _mm["mismatch_index"],
-    q=4,
-    labels=["Q1_well_served", "Q2", "Q3", "Q4_underserved"],
-    duplicates="drop",
-)
-df_mm = _mm[["stateabbr", "burden_rank", "trial_rank", "mismatch_index", "mismatch_quartile"]]
-
 acs_core = [
     "stateabbr", "pop_total", "median_hh_income", "gini_index",
     "pct_poverty", "pct_nhblack", "pct_hispanic", "pct_no_vehicle",
     "pct_no_internet", "pct_unemployed", "pct_uninsured", "pct_bachelors_plus",
 ]
 acs_core = [c for c in acs_core if c in df_acs.columns]
-
-mm_extra = [c for c in ["stateabbr", "mismatch_index", "mismatch_quartile", "burden_rank", "trial_rank"] if c in df_mm.columns]
 
 
 def _pivot_density(df, cat_col, prefix):
@@ -1625,12 +1178,10 @@ df_state_model = (
     .merge(df_acs[acs_core], on="stateabbr", how="left")
     .merge(df_places, on="stateabbr", how="left")
     .merge(df_npi[["stateabbr", "endo_per_100k", "amc_count", "has_ctsa"]], on="stateabbr", how="left")
-    .merge(df_mm[mm_extra], on="stateabbr", how="left")
     .merge(_pivot_density(df_phase, "phase_group", "trials_100k_phase"), on="stateabbr", how="left")
     .merge(_pivot_density(df_spon, "sponsor_group", "trials_100k_sponsor"), on="stateabbr", how="left")
     .merge(_pivot_density(df_stat, "status_group", "trials_100k_status"), on="stateabbr", how="left")
 )
-
 
 
 df_state_model.insert(0, "geo_level", "state")
@@ -1645,15 +1196,9 @@ df_state_model.to_csv(MOD / "state_modeling_final.csv", index=False)
 print("Saved: state_modeling_final.csv")
 ```
 
-### State Modeling Readiness
-
-The state modeling export aligns the acquisition and EDA pipeline with downstream modeling needs by combining burden, SES, infrastructure, and stratified sponsor/phase/status features in one table. The current output contains 51 rows and 57 columns.
-
-
 ## 5. County Extension
 
-The notebook already extends the analysis to counties, which is where access disparities become much more visible. The county workflow resolves site locations to county FIPS, estimates distance to the nearest trial site, enriches each county with ACS and PLACES variables, and builds a county-level table aligned to the same modeling schema used at the state level.
-
+The analysis extends to counties to resolve site locations to county FIPS, estimate distance to the nearest trial site, enrich counties with ACS and PLACES features, and assemble a county-level modeling table aligned to the state schema.
 
 ```{python}
 #| label: county-city-to-fips-resolution
@@ -2260,137 +1805,6 @@ print("Saved: county_coverage_alignment.csv")
 ```
 
 ```{python}
-#| label: county-eda-figures
-# 5-J: County EDA figures.
-df_c = pd.read_csv(TEMP / "county_coverage_alignment.csv", dtype={"county_fips": str})
-
-# Normalize has_trial_site to boolean for robust filtering across saved dtypes.
-has_site_bool = (
-    df_c["has_trial_site"].astype(str).str.lower().isin({"true", "1", "yes"})
-    if "has_trial_site" in df_c.columns
-    else pd.Series(False, index=df_c.index)
-)
-
-# 5-J-1: Distance histogram for counties that do not host a trial site.
-fig, ax = plt.subplots(figsize=(9, 4))
-no_site = df_c[~has_site_bool]
-ax.hist(no_site["dist_nearest_trial_km"].dropna(), bins=60, color="#1a6faf", edgecolor="none", alpha=0.85)
-ymax = ax.get_ylim()[1]
-for thresh, lbl in [(50, "50 km"), (100, "100 km"), (200, "200 km")]:
-    pct = (no_site["dist_nearest_trial_km"] > thresh).mean() * 100
-    ax.axvline(thresh, color="crimson", lw=1.4, ls="--")
-    ax.text(thresh + 2, ymax * 0.88, f">{lbl}\n{pct:.0f}%", color="crimson", fontsize=8)
-ax.set_xlabel("Distance to Nearest Trial Site (km)", fontsize=11)
-ax.set_ylabel("Number of Counties (no site)", fontsize=11)
-ax.set_title("Distance to Nearest Diabetes Trial Site (Counties Without a Site)", fontsize=12)
-sns.despine(ax=ax)
-plt.tight_layout()
-plt.savefig(RESULTS / "county_distance_histogram.png", dpi=150)
-plt.show()
-
-# 5-J-2: Distance vs diabetes prevalence.
-if "places_diabetes" in df_c.columns:
-    fig, ax = plt.subplots(figsize=(7, 5))
-    plot_df = df_c[["dist_nearest_trial_km", "places_diabetes"]].dropna()
-    ax.scatter(plot_df["places_diabetes"], plot_df["dist_nearest_trial_km"], alpha=0.15, s=8, color="#1a6faf")
-    m, b = np.polyfit(plot_df["places_diabetes"], plot_df["dist_nearest_trial_km"], 1)
-    xr = np.linspace(plot_df["places_diabetes"].min(), plot_df["places_diabetes"].max(), 100)
-    ax.plot(xr, m * xr + b, color="crimson", lw=1.5, label=f"OLS slope={m:.1f}")
-    ax.set_xlabel("Diabetes Prevalence (age-adj. %, CDC PLACES)", fontsize=11)
-    ax.set_ylabel("Distance to Nearest Trial Site (km)", fontsize=11)
-    ax.set_title("High-Burden Counties Farther from Trials?", fontsize=12)
-    ax.legend(fontsize=9)
-    sns.despine(ax=ax)
-    plt.tight_layout()
-    plt.savefig(RESULTS / "county_distance_vs_diabetes.png", dpi=150)
-    plt.show()
-
-# 5-J-3: Endocrinologist density vs trial density.
-fig, ax = plt.subplots(figsize=(7, 5))
-plot_df = df_c[["endo_per_100k", "trials_per_100k"]].dropna()
-plot_df = plot_df[(plot_df["endo_per_100k"] < 50) & (plot_df["trials_per_100k"] < 200)]
-if len(plot_df) > 10:
-    ax.scatter(plot_df["endo_per_100k"], plot_df["trials_per_100k"], alpha=0.15, s=8, color="#2ca02c")
-    m, b = np.polyfit(plot_df["endo_per_100k"], plot_df["trials_per_100k"], 1)
-    xr = np.linspace(0, plot_df["endo_per_100k"].quantile(0.99), 100)
-    ax.plot(xr, m * xr + b, color="crimson", lw=1.5, label=f"OLS slope={m:.2f}")
-    ax.set_xlabel("Endocrinologists per 100k Population", fontsize=11)
-    ax.set_ylabel("Trials per 100k Population", fontsize=11)
-    ax.set_title("Trial Gravity Around Endocrinologists?", fontsize=12)
-    ax.legend(fontsize=9)
-    sns.despine(ax=ax)
-    plt.tight_layout()
-    plt.savefig(RESULTS / "county_endo_vs_trials.png", dpi=150)
-    plt.show()
-
-# 5-J-4: AMC count vs trial density.
-fig, ax = plt.subplots(figsize=(7, 5))
-plot_df = df_c[["amc_count", "trials_per_100k"]].dropna()
-plot_df = plot_df[plot_df["trials_per_100k"] < 200].copy()
-plot_df["amc_cap"] = plot_df["amc_count"].clip(upper=10)
-ax.scatter(plot_df["amc_cap"], plot_df["trials_per_100k"], alpha=0.15, s=8, color="#9467bd")
-medians = plot_df.groupby("amc_cap")["trials_per_100k"].median()
-ax.plot(medians.index, medians.values, color="crimson", lw=2, marker="o", ms=5, label="Median trials/100k")
-ax.set_xlabel("AMC NPI-2 Org Count per County (capped at 10)", fontsize=11)
-ax.set_ylabel("Trials per 100k Population", fontsize=11)
-ax.set_title("AMC Gravity Effect on Trial Density", fontsize=12)
-ax.legend(fontsize=9)
-sns.despine(ax=ax)
-plt.tight_layout()
-plt.savefig(RESULTS / "county_amc_vs_trials.png", dpi=150)
-plt.show()
-
-# 5-J-5: County-level correlation heatmap.
-hm_candidates = [
-    "trials_per_100k", "dist_nearest_trial_km", "places_diabetes",
-    "endo_per_100k", "amc_count",
-    "pct_poverty", "median_hh_income", "pct_uninsured", "pct_no_vehicle",
-    "pct_no_internet", "pct_nhblack", "pct_hispanic",
-    "places_obesity", "places_bphigh", "places_kidney", "places_stroke", "places_chd",
-]
-hm_vars = [v for v in hm_candidates if v in df_c.columns]
-corr_mat = df_c[hm_vars].corr()
-fig, ax = plt.subplots(figsize=(13, 11))
-sns.heatmap(
-    corr_mat,
-    annot=True,
-    fmt=".2f",
-    cmap="RdBu_r",
-    center=0,
-    linewidths=0.3,
-    square=True,
-    ax=ax,
-    annot_kws={"size": 6},
-)
-ax.set_title(f"County-Level Correlation Heatmap (n={len(df_c):,})", fontsize=13)
-plt.tight_layout()
-plt.savefig(RESULTS / "county_correlation_heatmap.png", dpi=150)
-plt.show()
-print("Saved: county_correlation_heatmap.png")
-
-# 5-J-6: Aggregate county distance to a state-level tile map.
-df_state_dist = (
-    df_c.assign(state_fips=df_c["county_fips"].str[:2])
-    .groupby("state_fips")["dist_nearest_trial_km"]
-    .mean()
-    .reset_index(name="mean_dist_km")
-)
-df_state_dist["stateabbr"] = df_state_dist["state_fips"].map(FIPS_TO_ABBR)
-df_state_dist = df_state_dist.dropna(subset=["stateabbr"])
-
-tile_choropleth(
-    df_state_dist,
-    value_col="mean_dist_km",
-    title="Mean Distance to Nearest Trial Site by State (km)",
-    cmap_name="YlOrRd",
-    out_name="state_tile_mean_distance.png",
-)
-
-print("\nSection 5 county-level EDA complete.")
-print(f"All figures saved to: {RESULTS}")
-```
-
-```{python}
 #| label: county-modeling-table
 #| output: false
 # County-Level Modeling Table (shared schema)
@@ -2461,32 +1875,594 @@ df_county_model.to_csv(MOD / "county_modeling_final.csv", index=False)
 print("Saved: county_modeling_final.csv")
 ```
 
-### County Result Summary
+## 6. Final-Dataset EDA
 
-- 41,917 of 47,118 site rows were matched to counties, an 89.0% match rate.
-- Only 862 counties have at least one trial site, meaning 26.8% of counties host a site in the final county table.
-- Among counties without a trial site, the notebook reports a median nearest-site distance of 58.8 km, with 24.1% more than 100 km away and 8.2% more than 200 km away.
-- The county table contains 3,221 rows and 41 columns before the final modeling-table reshaping step.
-- Endocrinologist presence is sparse at the county level, and the observed association with trial density is positive but weak.
-- Distance to the nearest site does not increase in any simple linear way with diabetes burden. The county plots point more strongly to infrastructure and geographic concentration than to burden alone.
+This section performs compact exploratory checks directly on `state_modeling_final.csv` and `county_modeling_final.csv`. The goal is to validate the actual modeling inputs rather than generate a separate exploratory plot set from intermediate tables.
+
+```{python}
+#| label: final-dataset-load
+state_df = pd.read_csv(MOD / "state_modeling_final.csv")
+county_df = pd.read_csv(MOD / "county_modeling_final.csv", dtype={"geo_id": str})
+
+print(f"Loaded state modeling data: {state_df.shape[0]} rows x {state_df.shape[1]} columns")
+print(f"Loaded county modeling data: {county_df.shape[0]} rows x {county_df.shape[1]} columns")
+```
+
+```{python}
+#| label: final-dataset-eda-tables
+#| output: asis
+EDA_TARGETS = {
+    "state": ["trials_per_100k", "coverage_residual", "industry_pct", "endo_per_100k", "amc_count"],
+    "county": ["trials_per_100k", "coverage_residual", "dist_nearest_trial_km", "endo_per_100k", "amc_count"],
+}
 
 
-### County Interpretation
+def top_missingness(df, top_n=12):
+    out = (
+        df.isna().mean()
+        .rename("missing_share")
+        .reset_index()
+        .rename(columns={"index": "column"})
+        .query("missing_share > 0")
+        .sort_values("missing_share", ascending=False)
+        .head(top_n)
+    )
+    out["missing_pct"] = (100 * out["missing_share"]).round(1)
+    return out[["column", "missing_pct"]]
 
-The county extension is the strongest evidence in the current report that trial access is uneven in a practical, geographic sense. State averages can hide these access frictions. County-level site absence and distance reveal a much more tangible barrier structure, which is likely to be more informative for the next modeling stage than state-only residuals.
+
+def summary_table(df, cols):
+    cols = [c for c in cols if c in df.columns]
+    if not cols:
+        return pd.DataFrame(columns=["column", "mean", "std", "min", "p25", "median", "p75", "max"])
+    out = df[cols].describe(percentiles=[0.25, 0.5, 0.75]).T.reset_index()
+    out = out.rename(columns={"index": "column", "25%": "p25", "50%": "median", "75%": "p75"})
+    return out[["column", "mean", "std", "min", "p25", "median", "p75", "max"]].round(3)
 
 
-## 6. Caveats and Reporting Notes
+def top_target_correlations(df, target, top_n=8, exclude=None, drop_prefixes=None):
+    exclude = set(exclude or [])
+    drop_prefixes = tuple(drop_prefixes or [])
+    numeric = df.select_dtypes(include=[np.number]).copy()
+    if target not in numeric.columns:
+        return pd.DataFrame(columns=["feature", "correlation"])
 
-- `coverage_residual` is a descriptive benchmark, not a causal estimate.
-- Two states, Kentucky and Pennsylvania, are missing state-level PLACES burden in the assembled state coverage table.
-- County matching is incomplete: 458 city-state pairs remain unmatched after Gazetteer and FCC resolution.
-- Distance is a Haversine straight-line proxy, not road travel time.
-- County outputs include Puerto Rico county-equivalent FIPS codes, so future modeling should decide explicitly whether to keep or exclude them.
-- AMC and CTSA infrastructure proxies are approximate and should be interpreted cautiously.
-- The county modeling table is intentionally aligned to the state schema, but the notebook reports one missing shared-core field: `places_kidney`.
+    keep_cols = [
+        col for col in numeric.columns
+        if col != target and col not in exclude and not any(col.startswith(prefix) for prefix in drop_prefixes)
+    ]
+    if not keep_cols:
+        return pd.DataFrame(columns=["feature", "correlation"])
 
+    corr = numeric[keep_cols + [target]].corr(numeric_only=True)[target].drop(labels=[target], errors="ignore").dropna()
+    corr = corr.reindex(corr.abs().sort_values(ascending=False).index).head(top_n)
+    return corr.rename_axis("feature").reset_index(name="correlation").round(3)
+
+
+state_missing = top_missingness(state_df)
+county_missing = top_missingness(county_df)
+state_summary = summary_table(state_df, EDA_TARGETS["state"])
+county_summary = summary_table(county_df, EDA_TARGETS["county"])
+state_corr = top_target_correlations(
+    state_df,
+    "coverage_residual",
+    exclude={"trial_count", "site_count", "trials_per_100k", "industry_pct"},
+    drop_prefixes=["trials_100k_"],
+)
+county_corr = top_target_correlations(
+    county_df,
+    "trials_per_100k",
+    exclude={"coverage_residual", "county_trial_count", "county_site_count", "has_trial_site", "burden_decile"},
+)
+
+state_missing.to_csv(TEMP / "state_final_dataset_missingness.csv", index=False)
+county_missing.to_csv(TEMP / "county_final_dataset_missingness.csv", index=False)
+state_summary.to_csv(TEMP / "state_final_dataset_summary.csv", index=False)
+county_summary.to_csv(TEMP / "county_final_dataset_summary.csv", index=False)
+state_corr.to_csv(TEMP / "state_final_dataset_correlations.csv", index=False)
+county_corr.to_csv(TEMP / "county_final_dataset_correlations.csv", index=False)
+
+county_has_site = county_df["has_trial_site"].astype(str).str.lower().isin({"true", "1", "yes"}) if "has_trial_site" in county_df.columns else pd.Series(False, index=county_df.index)
+
+print("State dataset overview")
+print(state_summary.to_string(index=False))
+print("Top state missingness columns")
+print(state_missing.to_string(index=False) if not state_missing.empty else "No missing values detected.")
+print("Top non-derived correlations with state coverage_residual")
+print(state_corr.to_string(index=False) if not state_corr.empty else "No numeric correlations available.")
+print(f"Share of states with negative coverage residual: {(state_df['coverage_residual'] < 0).mean() * 100:.1f}%")
+
+print("County dataset overview")
+print(county_summary.to_string(index=False))
+print("Top county missingness columns")
+print(county_missing.to_string(index=False) if not county_missing.empty else "No missing values detected.")
+print("Top non-derived correlations with county trials_per_100k")
+print(county_corr.to_string(index=False) if not county_corr.empty else "No numeric correlations available.")
+print(f"Share of counties with zero trial density: {(county_df['trials_per_100k'].fillna(0) == 0).mean() * 100:.1f}%")
+print(f"Share of counties without a trial site: {(~county_has_site).mean() * 100:.1f}%")
+
+print("Saved EDA tables:")
+for name in [
+    "state_final_dataset_missingness.csv",
+    "county_final_dataset_missingness.csv",
+    "state_final_dataset_summary.csv",
+    "county_final_dataset_summary.csv",
+    "state_final_dataset_correlations.csv",
+    "county_final_dataset_correlations.csv",
+]:
+    print(" -", TEMP / name)
+```
+
+```{python}
+#| label: final-dataset-eda-plots
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+state_resid = state_df["coverage_residual"].dropna()
+sns.histplot(state_resid, bins=15, kde=True, color="#1f77b4", ax=axes[0, 0])
+axes[0, 0].axvline(0, color="black", lw=1, ls="--")
+axes[0, 0].set_title("State coverage residual distribution")
+axes[0, 0].set_xlabel("Coverage residual")
+axes[0, 0].set_ylabel("State count")
+
+state_scatter_cols = ["places_diabetes", "trials_per_100k", "coverage_residual"]
+if all(col in state_df.columns for col in state_scatter_cols):
+    state_plot = state_df[state_scatter_cols + ["geo_id"]].dropna().copy()
+    sns.scatterplot(
+        data=state_plot,
+        x="places_diabetes",
+        y="trials_per_100k",
+        hue="coverage_residual",
+        palette="RdBu_r",
+        s=80,
+        ax=axes[0, 1],
+    )
+    axes[0, 1].set_title("State burden vs trial density")
+    axes[0, 1].set_xlabel("Diabetes prevalence (PLACES)")
+    axes[0, 1].set_ylabel("Trials per 100k")
+else:
+    axes[0, 1].text(0.5, 0.5, "Required state columns missing", ha="center", va="center")
+    axes[0, 1].set_axis_off()
+
+county_has_site = county_df["has_trial_site"].astype(str).str.lower().isin({"true", "1", "yes"}) if "has_trial_site" in county_df.columns else pd.Series(False, index=county_df.index)
+if "dist_nearest_trial_km" in county_df.columns:
+    no_site = county_df.loc[~county_has_site, "dist_nearest_trial_km"].dropna()
+    sns.histplot(no_site, bins=40, color="#f59e0b", ax=axes[1, 0])
+    if not no_site.empty:
+        axes[1, 0].axvline(no_site.median(), color="black", lw=1, ls="--", label=f"Median = {no_site.median():.1f} km")
+        axes[1, 0].legend(loc="upper right")
+    axes[1, 0].set_title("County nearest-site distance (no-site counties)")
+    axes[1, 0].set_xlabel("Distance to nearest trial site (km)")
+    axes[1, 0].set_ylabel("County count")
+else:
+    axes[1, 0].text(0.5, 0.5, "dist_nearest_trial_km not available", ha="center", va="center")
+    axes[1, 0].set_axis_off()
+
+county_scatter_cols = ["endo_per_100k", "trials_per_100k"]
+if all(col in county_df.columns for col in county_scatter_cols):
+    county_plot = county_df[county_scatter_cols + ["has_trial_site"]].dropna().copy()
+    county_plot = county_plot[
+        (county_plot["endo_per_100k"] <= county_plot["endo_per_100k"].quantile(0.99))
+        & (county_plot["trials_per_100k"] <= county_plot["trials_per_100k"].quantile(0.99))
+    ]
+    county_plot["has_trial_site"] = county_plot["has_trial_site"].astype(str).str.lower().isin({"true", "1", "yes"})
+    sns.scatterplot(
+        data=county_plot,
+        x="endo_per_100k",
+        y="trials_per_100k",
+        hue="has_trial_site",
+        palette={True: "#2ca02c", False: "#9ca3af"},
+        alpha=0.45,
+        s=20,
+        ax=axes[1, 1],
+    )
+    axes[1, 1].set_title("County endocrinologist density vs trial density")
+    axes[1, 1].set_xlabel("Endocrinologists per 100k")
+    axes[1, 1].set_ylabel("Trials per 100k")
+else:
+    axes[1, 1].text(0.5, 0.5, "Required county columns missing", ha="center", va="center")
+    axes[1, 1].set_axis_off()
+
+fig.suptitle("EDA on Final Modeling Datasets", fontsize=14)
+fig.tight_layout()
+fig.savefig(RESULTS / "final_dataset_eda_overview.png", dpi=200)
+plt.show()
+print("Saved figure:", RESULTS / "final_dataset_eda_overview.png")
+```
 
 ## 7. Ready for Modeling
 
-This QMD now contains the completed acquisition and EDA pipeline from the notebook in a report-ready format. The next step can focus directly on modeling inside this document, using `product/data/modified/state_modeling_final.csv` and `product/data/modified/county_modeling_final.csv` as the current model-ready starting points.
+The analysis now transitions from dataset assembly and validation to county-level modeling using the finalized state and county tables in `product/data/modified/`.
+
+```{python}
+import pandas as pd
+import numpy as np
+```
+
+```{python}
+state_df = pd.read_csv("../../product/data/modified/state_modeling_final.csv")
+county_df = pd.read_csv("../../product/data/modified/county_modeling_final.csv")
+```
+
+```{python}
+state_df.head(20)
+```
+
+## 8. Modeling: County Diabetes Burden
+
+This section models county-level diabetes burden (`places_diabetes`) as a function
+of county diabetes clinical trial access and county socioeconomic conditions,
+following the modeling plan in `option_c_burden_target_modeling_plan.md`.
+Three complementary models are estimated:
+
+| Model | Purpose |
+|-------|---------|
+| **Elastic Net** | Linear baseline; regularization handles correlated SES predictors |
+| **Random Forest** | Nonlinear ensemble; permutation importance ranks predictors without standardization |
+| **XGBoost** | Gradient boosting; highest predictive performance; SHAP enables group-level attribution |
+
+### Variable Treatment
+
+| Group | Variables | Transform |
+|-------|-----------|----------|
+| Trial Access | `trials_per_100k`, `dist_nearest_trial_km` | `log1p` → `log_trials`, `log_dist` |
+| Economic | `pct_poverty`, `median_hh_income`, `gini_index` | as-is |
+| Healthcare | `pct_uninsured` | as-is |
+| Labor & Education | `pct_unemployed`, `pct_bachelors_plus` | as-is |
+| Infrastructure | `pct_no_vehicle`, `pct_no_internet` | as-is |
+| Demographic | `pct_nhblack`, `pct_hispanic` | as-is |
+| Geography | `pop_total` | `log` → `log_pop` |
+
+All 13 predictors are standardized for Elastic Net (required for regularization).
+Tree methods use the same log-transformed features **without** standardization.
+
+```{python}
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import ElasticNetCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold, cross_val_predict
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+county_df = pd.read_csv("../../product/data/modified/county_modeling_final.csv")
+print(f"County dataset: {county_df.shape[0]} rows, {county_df.shape[1]} columns")
+```
+
+```{python}
+# Target variable
+target = "places_diabetes"
+
+# Log-transform skewed variables per modeling plan
+county_df["log_trials"] = np.log1p(county_df["trials_per_100k"])
+county_df["log_dist"]   = np.log1p(county_df["dist_nearest_trial_km"])
+county_df["log_pop"]    = np.log(county_df["pop_total"])
+
+# Predictor groups (per Section 4 and 5 of modeling plan)
+access_vars = ["log_trials", "log_dist"]
+ses_vars = [
+    "log_pop", "pct_poverty", "median_hh_income", "gini_index",
+    "pct_uninsured", "pct_unemployed", "pct_bachelors_plus",
+    "pct_no_vehicle", "pct_no_internet", "pct_nhblack", "pct_hispanic"
+]
+all_predictors = access_vars + ses_vars
+
+print(f"Access predictors ({len(access_vars)}): {access_vars}")
+print(f"SES predictors    ({len(ses_vars)}): {ses_vars}")
+```
+
+```{python}
+# Missingness summary for selected columns
+cols = [target] + all_predictors
+miss_n   = county_df[cols].isnull().sum()
+miss_pct = (miss_n / len(county_df) * 100).round(2)
+miss_table = pd.DataFrame({"missing_n": miss_n, "missing_pct": miss_pct})
+print("Missingness in selected columns:")
+print(miss_table[miss_table["missing_n"] > 0])
+
+# Complete-case analysis
+df_model = county_df[cols].dropna().copy()
+print(f"Complete cases: {len(df_model)} / {len(county_df)} ({100*len(df_model)/len(county_df):.1f}%)")
+```
+
+```{python}
+# Predictor correlation heatmap to check for multicollinearity
+corr = df_model[all_predictors].corr()
+fig, ax = plt.subplots(figsize=(12, 10))
+sns.heatmap(corr, annot=True, fmt=".2f", cmap="RdBu_r", center=0, square=True, ax=ax)
+ax.set_title("Predictor Correlation Heatmap")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# Standardize predictors and fit Elastic Net with cross-validation
+X = df_model[all_predictors].values
+y = df_model[target].values
+
+scaler = StandardScaler()
+X_sc   = scaler.fit_transform(X)
+
+cv   = KFold(n_splits=5, shuffle=True, random_state=42)
+enet = ElasticNetCV(
+    l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],
+    n_alphas=100,
+    cv=cv,
+    random_state=42,
+    max_iter=10000
+)
+enet.fit(X_sc, y)
+
+print(f"Best alpha:    {enet.alpha_:.6f}")
+print(f"Best l1_ratio: {enet.l1_ratio_:.2f}")
+```
+
+```{python}
+# Cross-validated performance
+y_pred_cv = cross_val_predict(enet, X_sc, y, cv=cv)
+
+rmse = np.sqrt(mean_squared_error(y, y_pred_cv))
+mae  = mean_absolute_error(y, y_pred_cv)
+r2   = r2_score(y, y_pred_cv)
+
+print("5-fold cross-validated performance:")
+print(f"  RMSE : {rmse:.4f}  (diabetes prevalence percentage points)")
+print(f"  MAE  : {mae:.4f}")
+print(f"  R²   : {r2:.4f}")
+```
+
+```{python}
+# Coefficient table sorted by absolute magnitude
+coef_df = pd.DataFrame({
+    "predictor":   all_predictors,
+    "group":       ["Trial Access"] * len(access_vars) + ["Socioeconomic"] * len(ses_vars),
+    "coefficient": enet.coef_,
+    "abs_coef":    np.abs(enet.coef_)
+}).sort_values("abs_coef", ascending=False)
+
+print("Elastic Net Coefficients (standardized predictors):")
+print(coef_df[["predictor", "group", "coefficient"]].to_string(index=False))
+```
+
+```{python}
+# Coefficient bar plot
+coef_plot = coef_df.sort_values("coefficient")
+colors = ["#e74c3c" if g == "Trial Access" else "#3498db" for g in coef_plot["group"]]
+
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.barh(coef_plot["predictor"], coef_plot["coefficient"], color=colors)
+ax.axvline(x=0, color="black", linewidth=0.8)
+ax.set_xlabel("Standardized Coefficient")
+ax.set_title("Elastic Net Coefficients — Trial Access (red) vs Socioeconomic (blue)")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# Actual vs predicted scatter
+fig, ax = plt.subplots(figsize=(7, 7))
+ax.scatter(y, y_pred_cv, alpha=0.25, s=8, color="#2c3e50")
+ax.plot([y.min(), y.max()], [y.min(), y.max()], "r--", linewidth=1)
+ax.set_xlabel("Actual places_diabetes (%)")
+ax.set_ylabel("Predicted places_diabetes — CV (%)")
+ax.set_title(f"Actual vs Predicted  |  CV R² = {r2:.3f}")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+X_raw = df_model[all_predictors].values   # no standardization for trees
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import RandomizedSearchCV
+
+rf_param_dist = {
+    "n_estimators":     [200, 500, 800],
+    "max_depth":        [None, 10, 20, 30],
+    "min_samples_leaf": [1, 2, 4],
+    "max_features":     ["sqrt", "log2", 0.5],
+}
+
+rf_search = RandomizedSearchCV(
+    RandomForestRegressor(random_state=42, n_jobs=-1),
+    param_distributions=rf_param_dist,
+    n_iter=30,
+    cv=cv,
+    scoring="r2",
+    random_state=42,
+    n_jobs=-1,
+    verbose=1,
+)
+rf_search.fit(X_raw, y)
+
+print("Random Forest \u2014 Best hyperparameters:")
+for k, v in rf_search.best_params_.items():
+    print(f"  {k}: {v}")
+print(f"  Best CV R\u00b2: {rf_search.best_score_:.4f}")
+best_rf = rf_search.best_estimator_
+```
+
+```{python}
+# 5-fold CV performance of best-tuned Random Forest
+y_pred_rf = cross_val_predict(best_rf, X_raw, y, cv=cv)
+rmse_rf = np.sqrt(mean_squared_error(y, y_pred_rf))
+mae_rf  = mean_absolute_error(y, y_pred_rf)
+r2_rf   = r2_score(y, y_pred_rf)
+
+print("Random Forest (tuned) \u2014 5-fold CV:")
+print(f"  RMSE : {rmse_rf:.4f}  (diabetes prevalence percentage points)")
+print(f"  MAE  : {mae_rf:.4f}")
+print(f"  R\u00b2   : {r2_rf:.4f}")
+```
+
+```{python}
+from sklearn.inspection import permutation_importance
+
+# Fit best RF on full data for importance estimation
+best_rf.fit(X_raw, y)
+perm = permutation_importance(best_rf, X_raw, y, n_repeats=20, random_state=42, n_jobs=-1)
+
+imp_df = pd.DataFrame({
+    "predictor":  all_predictors,
+    "group":      ["Trial Access"] * len(access_vars) + ["Socioeconomic"] * len(ses_vars),
+    "importance": perm.importances_mean,
+    "std":        perm.importances_std,
+}).sort_values("importance", ascending=True)
+
+colors_rf = ["#e74c3c" if g == "Trial Access" else "#3498db" for g in imp_df["group"]]
+
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.barh(imp_df["predictor"], imp_df["importance"], xerr=imp_df["std"],
+        color=colors_rf, capsize=3)
+ax.set_xlabel("Permutation Importance (mean decrease in R\u00b2)")
+ax.set_title("Random Forest (tuned) Permutation Importance \u2014 Trial Access (red) vs Socioeconomic (blue)")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+from xgboost import XGBRegressor
+
+xgb_param_dist = {
+    "n_estimators":     [200, 500, 800],
+    "learning_rate":    [0.01, 0.05, 0.1, 0.2],
+    "max_depth":        [3, 5, 7],
+    "subsample":        [0.6, 0.8, 1.0],
+    "colsample_bytree": [0.6, 0.8, 1.0],
+    "min_child_weight": [1, 3, 5],
+}
+
+xgb_search = RandomizedSearchCV(
+    XGBRegressor(random_state=42, verbosity=0),
+    param_distributions=xgb_param_dist,
+    n_iter=30,
+    cv=cv,
+    scoring="r2",
+    random_state=42,
+    n_jobs=-1,
+    verbose=1,
+)
+xgb_search.fit(X_raw, y)
+
+print("XGBoost \u2014 Best hyperparameters:")
+for k, v in xgb_search.best_params_.items():
+    print(f"  {k}: {v}")
+print(f"  Best CV R\u00b2: {xgb_search.best_score_:.4f}")
+best_xgb = xgb_search.best_estimator_
+```
+
+```{python}
+# 5-fold CV performance of best-tuned XGBoost
+y_pred_xgb = cross_val_predict(best_xgb, X_raw, y, cv=cv)
+rmse_xgb = np.sqrt(mean_squared_error(y, y_pred_xgb))
+mae_xgb  = mean_absolute_error(y, y_pred_xgb)
+r2_xgb   = r2_score(y, y_pred_xgb)
+
+print("XGBoost (tuned) \u2014 5-fold CV:")
+print(f"  RMSE : {rmse_xgb:.4f}  (diabetes prevalence percentage points)")
+print(f"  MAE  : {mae_xgb:.4f}")
+print(f"  R\u00b2   : {r2_xgb:.4f}")
+```
+
+### Model Comparison
+
+The table and chart below compare 5-fold cross-validated RMSE, MAE, and R² across all three models, each fitted with its best-tuned hyperparameters.
+
+```{python}
+model_comparison = pd.DataFrame({
+    "Model": ["Elastic Net", "Random Forest", "XGBoost"],
+    "RMSE":  [rmse,     rmse_rf,  rmse_xgb],
+    "MAE":   [mae,      mae_rf,   mae_xgb],
+    "R²":    [r2,       r2_rf,    r2_xgb],
+})
+print(model_comparison.to_string(index=False))
+
+fig, ax = plt.subplots(figsize=(8, 4))
+x = np.arange(3)
+width = 0.25
+ax.bar(x - width, model_comparison["RMSE"], width, label="RMSE", color="#e74c3c")
+ax.bar(x,         model_comparison["MAE"],  width, label="MAE",  color="#3498db")
+ax.bar(x + width, model_comparison["R²"],   width, label="R²",   color="#2ecc71")
+ax.set_xticks(x)
+ax.set_xticklabels(model_comparison["Model"])
+ax.set_title("5-fold CV Model Comparison")
+ax.legend()
+plt.tight_layout()
+plt.show()
+```
+
+### SHAP Analysis
+
+SHAP values are used to decompose XGBoost predictions into feature-level contributions and aggregate importance by predictor block.
+
+```{python}
+import shap
+
+# Refit best XGBoost on full data for SHAP attribution
+best_xgb.fit(X_raw, y)
+explainer   = shap.TreeExplainer(best_xgb)
+shap_values = explainer.shap_values(X_raw)
+
+shap.summary_plot(shap_values, X_raw, feature_names=all_predictors, show=True)
+```
+
+```{python}
+group_map = {
+    "Trial Access":      ["log_trials", "log_dist"],
+    "Economic":          ["pct_poverty", "median_hh_income", "gini_index"],
+    "Healthcare":        ["pct_uninsured"],
+    "Labor & Education": ["pct_unemployed", "pct_bachelors_plus"],
+    "Infrastructure":    ["pct_no_vehicle", "pct_no_internet"],
+    "Demographic":       ["pct_nhblack", "pct_hispanic"],
+    "Geography":         ["log_pop"],
+}
+
+idx_map = {v: i for i, v in enumerate(all_predictors)}
+group_imp = {
+    g: np.abs(shap_values[:, [idx_map[v] for v in vars_]]).mean()
+    for g, vars_ in group_map.items()
+}
+
+group_df = pd.Series(group_imp).sort_values(ascending=True)
+colors_shap = ["#e74c3c" if g == "Trial Access" else "#2ecc71"
+              for g in group_df.index]
+
+group_df.plot(kind="barh", color=colors_shap, figsize=(8, 5))
+plt.xlabel("Mean |SHAP value|")
+plt.title(
+    "Group-Level Feature Importance (SHAP) \u2014 XGBoost\n"
+    "Trial Access (red) vs Other Groups (green)"
+)
+plt.tight_layout()
+plt.show()
+```
+
+### Interpretation
+
+Three complementary models have now estimated the relationship between county
+diabetes burden (`places_diabetes`) and two groups of predictors:
+**trial-access variables** (`log_trials`, `log_dist`) and
+**socioeconomic / demographic variables**.
+
+Key questions answered:
+
+1. **Do trial-access predictors matter after controlling for SES?**
+   - If Elastic Net coefficients for `log_trials` and `log_dist` are non-zero
+     and the Random Forest / XGBoost permutation importance and SHAP values
+     for those features are meaningful, trial geography is aligned with burden.
+   - If they shrink to near zero while SES coefficients dominate, trial
+     placement tracks structural advantage rather than disease burden.
+
+2. **Which predictor group drives county diabetes burden most?**
+   - The group-level SHAP bar chart (cell above) gives the definitive answer:
+     whichever group has the highest mean |SHAP| is the dominant driver.
+
+3. **Across-model consistency**
+   - Agreement across Elastic Net, Random Forest, and XGBoost strengthens
+     conclusions drawn from any single model.
+   - If XGBoost R² substantially exceeds Elastic Net R², this suggests
+     important nonlinear or interaction effects that the linear model misses.
+
+**Ecological caution:** All results are aggregate (county-level) associations.
+Individual-level inference is not warranted (ecological fallacy).
+No causal claims should be made from these cross-sectional regressions.

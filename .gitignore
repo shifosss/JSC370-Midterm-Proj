@@ -233,11 +233,19 @@ __marimo__/
 # Agent
 .claude/
 .codex/
-#AGENTS.md
-#CLAUDE.md
-*/PLAN.md
 
 **/data/raw/**
 option-d-conflicts-of-interest/*
 option-a-drug-safety/*
 option-b-ed-timeliness/*
+
+.jupyter_runtime/
+.quarto-tmp/
+.tmp/
+.codex_tmp/
+
+option-c-trial-access/product/*.txt
+
+# Markdown
+**/*.md
+!README.md
