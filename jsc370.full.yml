@@ -240,6 +240,7 @@ dependencies:
   - seaborn-base=0.13.2=pyhd8ed1ab_3
   - send2trash=2.1.0=pyh6dadd2b_1
   - setuptools=82.0.0=pyh332efcf_0
+  - shap=0.48.0
   - shapely=2.1.2=py312h37f46ab_2
   - six=1.17.0=pyhe01879c_1
   - sleef=3.9.0=h67fd636_0
@@ -281,6 +282,7 @@ dependencies:
   - xerces-c=3.3.0=hac47afa_1
   - xorg-libxau=1.0.12=hba3369d_1
   - xorg-libxdmcp=1.1.5=hba3369d_1
+  - xgboost=3.0.5
   - xyzservices=2025.11.0=pyhd8ed1ab_0
   - yaml=0.2.5=h6a83c73_3
   - zeromq=4.3.5=h507cc87_10

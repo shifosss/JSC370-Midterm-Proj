@@ -7,14 +7,8 @@ format:
     toc: true
     toc-depth: 3
     number-sections: true
-    code-fold: show
-    code-summary: "Show code"
     self-contained: true
     theme: cosmo
-execute:
-  echo: true
-  warning: false
-  message: false
 ---
 
 # Introduction
@@ -30,7 +24,7 @@ We hypothesize that diabetes clinical trial geography is not aligned with diseas
 # Methods
 
 ## Data Acquisition
-THe whole data was collected exclusively via programmatic API pulls and web scraping to compile a multi-dimensional, county-level dataset of the United States, completely avoiding the use of standalone Kaggle datasets. We obtained four types of data and merged them into a single dataset for analysis: (1) diabetes clinical trial access data from ClinicalTrials.gov, (2) county-level diabetes burden data from the CDC's Diabetes Atlas, (3) county-level socioeconomic data from the American Community Survey (ACS), and (4) county-level healthcare infrastructure data from the Area Health Resources Files (AHRF).
+The full dataset was collected exclusively via programmatic API pulls and web scraping to compile a multi-dimensional, county-level dataset of the United States, completely avoiding the use of standalone Kaggle datasets. We obtained four types of data and merged them into a single dataset for analysis: (1) diabetes clinical trial access data from ClinicalTrials.gov, (2) county-level diabetes burden data from CDC sources, (3) county-level socioeconomic data from the American Community Survey (ACS), and (4) county-level healthcare infrastructure proxies from the National Provider Identifier (NPI) registry, including endocrinologist density and academic medical center presence.
 
 ## Data Cleaning and Wrangling
 The raw nested JSON payloads from ClinicalTrials.gov were flattened into separate trial-level and site-level records. Because the clinical trial data provided city/state locations rather than standard identifiers, we used the 2022 Census Gazetteer combined with the FCC Census API (reverse geocoding latitude/longitude to FIPS codes) to accurately map trial sites to 5-digit County FIPS codes. To measure geographic isolation, we calculated the straight-line distance (using the Haversine formula and scipy.spatial.cKDTree) from each county's population centroid to the nearest clinical trial site. All datasets were merged on the County FIPS code. Missing values for core modeling features were handled via complete-case analysis. Highly skewed variables (e.g., total population, trial distance, and trial density) were log-transformed (log1p or log) to normalize distributions.
@@ -38,24 +32,84 @@ The raw nested JSON payloads from ClinicalTrials.gov were flattened into separat
 The EDA steps and feature engineering were conducted using pandas and numpy. Correlation heatmaps and distributions were visualized using seaborn and matplotlib. For predictive modeling, we utilized scikit-learn to apply standard scaling and build baseline Elastic Net regression models with 5-fold cross-validation. Advanced gradient boosting techniques (xgboost) were subsequently applied to capture non-linear relationships.
 
 # Preliminary Results
-The data pipeline aggregated 3,646 U.S. Type 2 diabetes studies and 47,118 site records. Upon aggregating to the county level, we found severe geographic gaps: only 26.8% of U.S. counties host a diabetes clinical trial site.
+The data pipeline aggregated 3,646 U.S. Type 2 diabetes studies and 47,118 site records. The descriptive results already point to a clear preliminary pattern: diabetes trial availability is geographically concentrated, does not scale smoothly with disease burden, and appears to cluster around research capacity more than around burden alone. These results are still exploratory, but they provide a strong rationale for the formal county-level modeling stage.
 
-The final merged county dataset successfully retained 3,221 counties, of which 2,947 (91.5%) had complete cases across all variables. The following table summarizes the key modeling features:
+## State-Level Burden and Trial Density Do Not Line Up Cleanly
 
-| Metric | Mean | Std. Dev | Min | 25th Percentile | Median | 75th Percentile | Max |
-|---|---|---|---|---|---|---|---|
-| **Trials per 100k Population** | 4.195 | 15.990 | 0.0 | 0.0 | 0.0 | 0.936 | 485.934 |
-| **Distance to Nearest Trial (km)** | 104.373 | 289.983 | 0.0 | 0.0 | 44.512 | 77.378 | 2093.380 |
-| **Endocrinologists per 100k** | 1.542 | 5.577 | 0.0 | 0.0 | 0.0 | 0.905 | 107.252 |
-| **Diabetes Prevalence (%)** | 11.2 | 2.5 | 6.0 | 9.5 | 11.0 | 12.8 | 24.5 |
+::: {.columns}
+::: {.column width="50%"}
+![State-level diabetes age-adjusted prevalence (%).](option-c-trial-access/discover/results/map_diabetes_prevalence_tile.png){width=100%}
+:::
+::: {.column width="50%"}
+![State-level diabetes trial-site density (trials per 100k population).](option-c-trial-access/discover/results/map_trial_density_tile.png){width=100%}
+:::
+:::
+
+Figure 1 shows the central descriptive mismatch. States with heavier diabetes burden are not automatically the states with denser trial availability. The diabetes belt remains visible in the South and Appalachia, but the trial-density map is more fragmented and includes several smaller, infrastructure-rich states that do not rank among the highest-burden areas. This visual divergence motivates a more explicit comparison between observed and expected trial density.
+
+To formalize that mismatch, I computed a state-level coverage residual: observed trial density minus the trial density expected for a state's diabetes-burden decile. Negative values indicate under-coverage relative to peer states with similar burden, while positive values indicate over-coverage.
+
+![Coverage residual outliers by state; bars are colored by industry share.](option-c-trial-access/discover/results/coverage_residual_outlier_bars.png){width=100%}
+
+The residual analysis sharpens the map comparison. Some high-burden or moderately high-burden states remain clearly under-covered relative to peer states, while several Mountain Plains and small-jurisdiction states appear over-covered. Sponsor composition is also concentrated: nationally, industry-sponsored trial density is 5.39 trials per 100k population versus 0.78 for non-industry trials, so industry density is about 6.9 times higher. That pattern suggests site placement is shaped by sponsor and infrastructure logistics, not just public-health need.
+
+**Table 1. Five most under-covered states relative to diabetes burden**
+
+| State | Trial count | Site count | Trials per 100k | Coverage residual | Industry share (%) |
+|---|---:|---:|---:|---:|---:|
+| WY | 1 | 1 | 0.17 | -8.58 | 0.0 |
+| AK | 8 | 9 | 1.09 | -7.66 | 87.5 |
+| NH | 98 | 103 | 7.10 | -5.11 | 96.9 |
+| WI | 221 | 285 | 3.76 | -4.50 | 88.2 |
+| CO | 458 | 685 | 7.94 | -4.28 | 80.8 |
+
+**Table 2. Five most over-covered states relative to diabetes burden**
+
+| State | Trial count | Site count | Trials per 100k | Coverage residual | Industry share (%) |
+|---|---:|---:|---:|---:|---:|
+| ID | 301 | 376 | 16.23 | 7.48 | 99.7 |
+| ND | 119 | 132 | 15.32 | 6.57 | 99.2 |
+| DC | 125 | 136 | 18.64 | 6.43 | 70.4 |
+| NE | 283 | 404 | 14.45 | 6.19 | 92.6 |
+| KS | 351 | 475 | 11.96 | 4.92 | 94.6 |
+
+Together, Figure 1, Figure 2, and Tables 1-2 show that the project is not simply describing low access everywhere. Instead, it is identifying a patterned allocation problem: some places are substantially under-supplied relative to their burden, while others receive disproportionately dense trial coverage.
+
+## County-Level Access Gaps Are Large
+
+State summaries still hide the lived access problem because most counties do not host a trial site at all. The county file retains 3,221 counties. Only 856 counties (26.6%) host at least one diabetes trial site, while 2,365 counties (73.4%) have none.
+
+**Table 3. County-level access summary**
+
+| Metric | Value |
+|---|---:|
+| Counties in final county file | 3,221 |
+| Counties with at least one trial site | 856 (26.6%) |
+| Counties without a trial site | 2,365 (73.4%) |
+| Median nearest-site distance among no-site counties | 58.4 km |
+| Share of no-site counties more than 50 km away | 59.7% |
+| Share of no-site counties more than 100 km away | 24.0% |
+| Share of no-site counties more than 200 km away | 8.2% |
+
+![Distance to the nearest diabetes trial site for counties without a local site.](option-c-trial-access/discover/results/county_distance_histogram.png){width=100%}
+
+This figure shows that the access problem is not marginal. For counties without a site, travel distance is often substantial rather than trivial. That pattern matters for the research question because a state can look moderately well-covered in aggregate while still leaving most of its counties without feasible local trial access.
+
+## Preliminary Evidence Points Toward Structural Concentration
+
+The descriptive evidence also suggests that trial geography may be linked to clinical research capacity. Counties with more endocrinologists tend to have higher trial density, which is consistent with the idea that trial sites cluster around specialty-care ecosystems rather than around burden alone.
+
+![Relationship between county endocrinologist density and county trial density.](option-c-trial-access/discover/results/county_endo_vs_trials.png){width=85%}
+
+This relationship does not establish causality, but it is exactly the pattern that motivates the final modeling plan. If trial access is largely an infrastructure phenomenon, then county-level models should show that provider capacity, socioeconomic advantage, and related contextual variables explain more of the variation in diabetes burden and trial geography than trial counts alone.
 
 # Summary
-Based on our exploratory data analysis and preliminary modeling, we have determined that diabetes clinical trial availability is highly concentrated and fails to align smoothly with local diabetes burden. The Elastic Net and XGBoost models clearly demonstrate that socioeconomic disadvantage (specifically high poverty rates, high uninsured rates, and lack of broadband internet) powerfully drives county-level diabetes burden. In contrast, trial access variables (log_trials and log_dist) possess incredibly weak predictive power and feature importance once socioeconomic status is controlled for. This answers our formulated question: trial geography does not match disease burden. Instead, trial access behaves as an infrastructure phenomenon, clustering around pre-existing academic medical centers and specialized provider networks, leaving structurally disadvantaged populations without trial access (Unger et al., 2019).
+The preliminary descriptive results support the project hypothesis, but they do not yet settle it. Trial availability is clearly concentrated, many counties remain physically distant from the nearest diabetes trial site, and the strongest descriptive relationships so far point toward infrastructure and sponsor concentration rather than burden matching. At the same time, these are still bivariate and descriptive patterns. They cannot tell us whether trial-access variables retain an independent association with diabetes burden once poverty, insurance, education, race and ethnicity, rurality, internet access, and provider infrastructure are considered jointly.
 
-For the final deliverable, we will transition these insights into a highly interactive, public-facing data product. The steps are as follows:
-1. Machine Learning Modeling: We will refine our XGBoost model to extract deeper insights. We will implement SHAP (SHapley Additive exPlanations) values to conduct a group-level attribution analysis. This will allow us to quantify exact, non-linear interaction effects between the compounding effects of rurality, racial demographics, and restricted trial access.
-2. Website Development: We will build a dynamic dashboard using a framework such as Streamlit or Dash. This web app will serve as a "Clinical Trial Equity Tracker," allowing policymakers, sponsors, and researchers to audit specific states and counties.
-3. Interactive Visualizations: The website will feature an interactive geospatial map (using Folium or Mapbox) plotting county-level diabetes prevalence as a choropleth layer, overlaid with exact clinical trial site locations as interactive nodes. Users will be able to filter by sponsor type and hover over counties to view dynamic SHAP plots explaining the specific local socio-structural barriers preventing clinical trial expansion in that area.
+That gap is precisely why the next stage of the project matters. For the final deliverable, the plan is:
+1. Fit county-level multivariable models to quantify the joint contribution of trial access, socioeconomic disadvantage, and healthcare infrastructure to diabetes burden.
+2. Compare linear and non-linear models, then use SHAP-based attribution on the best-performing model to determine which predictor blocks are actually driving the results.
+3. Translate those findings into an interactive public-facing product that lets users identify counties and states where burden, access, and infrastructure are most misaligned.
 
 # References
 
