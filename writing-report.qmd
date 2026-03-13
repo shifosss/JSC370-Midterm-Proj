@@ -1,0 +1,70 @@
+---
+title: "Deliverable Report: The Geography of Disparity in Diabetes Clinical Trial Access"
+author: "Chen Zhang"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: show
+    code-summary: "Show code"
+    self-contained: true
+    theme: cosmo
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Introduction
+
+## Background and Motivation
+Diabetes mellitus represents a major public health crisis in the United States, exhibiting profound geographic and socioeconomic disparities (Barker et al., 2011). Socioeconomic status, including factors such as poverty, education, and health insurance, plays a critical role in the prevalence and management of the disease (Hill-Briggs et al., 2021). As the medical industry continues to develop innovative treatments for Type 2 diabetes, a paradox remains: the opportunities to participate in clinical trials are not distributed equitably across the national geography. Clinical trial locations are frequently driven by institutional infrastructure and socioeconomic environments, creating a spatial mismatch that systematically excludes vulnerable, rural, and high-burden populations from research (Tanner et al., 2015; Unger et al., 2019). This lack of access often manifests in the form of physical travel barriers and a lack of local trial availability, directly limiting the generalizability of clinical research (Kirkwood et al., 2024). 
+
+## Research Question and Hypothesis
+Therefore, the research question is: "To what extent do county-level diabetes clinical trial access and county socioeconomic conditions jointly predict county-level diabetes burden in the United States? Specifically, are diabetes clinical trial sites concentrated in counties with greater diabetes burden, or are they more strongly associated with county socioeconomic advantage and local research capacity?"
+
+We hypothesize that diabetes clinical trial geography is not aligned with disease burden; rather, trial placement primarily tracks structural advantage, favorable socioeconomic conditions, and the presence of academic medical infrastructure.
+
+# Methods
+
+## Data Acquisition
+THe whole data was collected exclusively via programmatic API pulls and web scraping to compile a multi-dimensional, county-level dataset of the United States, completely avoiding the use of standalone Kaggle datasets. We obtained four types of data and merged them into a single dataset for analysis: (1) diabetes clinical trial access data from ClinicalTrials.gov, (2) county-level diabetes burden data from the CDC's Diabetes Atlas, (3) county-level socioeconomic data from the American Community Survey (ACS), and (4) county-level healthcare infrastructure data from the Area Health Resources Files (AHRF).
+
+## Data Cleaning and Wrangling
+The raw nested JSON payloads from ClinicalTrials.gov were flattened into separate trial-level and site-level records. Because the clinical trial data provided city/state locations rather than standard identifiers, we used the 2022 Census Gazetteer combined with the FCC Census API (reverse geocoding latitude/longitude to FIPS codes) to accurately map trial sites to 5-digit County FIPS codes. To measure geographic isolation, we calculated the straight-line distance (using the Haversine formula and scipy.spatial.cKDTree) from each county's population centroid to the nearest clinical trial site. All datasets were merged on the County FIPS code. Missing values for core modeling features were handled via complete-case analysis. Highly skewed variables (e.g., total population, trial distance, and trial density) were log-transformed (log1p or log) to normalize distributions.
+
+The EDA steps and feature engineering were conducted using pandas and numpy. Correlation heatmaps and distributions were visualized using seaborn and matplotlib. For predictive modeling, we utilized scikit-learn to apply standard scaling and build baseline Elastic Net regression models with 5-fold cross-validation. Advanced gradient boosting techniques (xgboost) were subsequently applied to capture non-linear relationships.
+
+# Preliminary Results
+The data pipeline aggregated 3,646 U.S. Type 2 diabetes studies and 47,118 site records. Upon aggregating to the county level, we found severe geographic gaps: only 26.8% of U.S. counties host a diabetes clinical trial site.
+
+The final merged county dataset successfully retained 3,221 counties, of which 2,947 (91.5%) had complete cases across all variables. The following table summarizes the key modeling features:
+
+| Metric | Mean | Std. Dev | Min | 25th Percentile | Median | 75th Percentile | Max |
+|---|---|---|---|---|---|---|---|
+| **Trials per 100k Population** | 4.195 | 15.990 | 0.0 | 0.0 | 0.0 | 0.936 | 485.934 |
+| **Distance to Nearest Trial (km)** | 104.373 | 289.983 | 0.0 | 0.0 | 44.512 | 77.378 | 2093.380 |
+| **Endocrinologists per 100k** | 1.542 | 5.577 | 0.0 | 0.0 | 0.0 | 0.905 | 107.252 |
+| **Diabetes Prevalence (%)** | 11.2 | 2.5 | 6.0 | 9.5 | 11.0 | 12.8 | 24.5 |
+
+# Summary
+Based on our exploratory data analysis and preliminary modeling, we have determined that diabetes clinical trial availability is highly concentrated and fails to align smoothly with local diabetes burden. The Elastic Net and XGBoost models clearly demonstrate that socioeconomic disadvantage (specifically high poverty rates, high uninsured rates, and lack of broadband internet) powerfully drives county-level diabetes burden. In contrast, trial access variables (log_trials and log_dist) possess incredibly weak predictive power and feature importance once socioeconomic status is controlled for. This answers our formulated question: trial geography does not match disease burden. Instead, trial access behaves as an infrastructure phenomenon, clustering around pre-existing academic medical centers and specialized provider networks, leaving structurally disadvantaged populations without trial access (Unger et al., 2019).
+
+For the final deliverable, we will transition these insights into a highly interactive, public-facing data product. The steps are as follows:
+1. Machine Learning Modeling: We will refine our XGBoost model to extract deeper insights. We will implement SHAP (SHapley Additive exPlanations) values to conduct a group-level attribution analysis. This will allow us to quantify exact, non-linear interaction effects between the compounding effects of rurality, racial demographics, and restricted trial access.
+2. Website Development: We will build a dynamic dashboard using a framework such as Streamlit or Dash. This web app will serve as a "Clinical Trial Equity Tracker," allowing policymakers, sponsors, and researchers to audit specific states and counties.
+3. Interactive Visualizations: The website will feature an interactive geospatial map (using Folium or Mapbox) plotting county-level diabetes prevalence as a choropleth layer, overlaid with exact clinical trial site locations as interactive nodes. Users will be able to filter by sponsor type and hover over counties to view dynamic SHAP plots explaining the specific local socio-structural barriers preventing clinical trial expansion in that area.
+
+# References
+
+Barker, L. E., Kirtland, K. A., Gregg, E. W., Geiss, L. S., & Thompson, T. J. (2011). Geographic distribution of diagnosed diabetes in the U.S.: A diabetes belt. American Journal of Preventive Medicine, 40(4), 434–439. https://doi.org/10.1016/j.amepre.2010.12.019
+
+Hill-Briggs, F., Adler, N. E., Berkowitz, S. A., Chin, M. H., Gary-Webb, T. L., Navas-Acien, A., Thornton, P. L., & Haire-Joshu, D. (2021). Social determinants of health and diabetes: A scientific review. Diabetes Care, 44(1), 258–279. https://doi.org/10.2337/dci20-0053
+
+Kirkwood, M. K., Schenkel, C., Hinshaw, D. C., Bruinooge, S. S., Waterhouse, D. M., Peppercorn, J. M., Subbiah, I. M., & Levit, L. A. (2024). State of geographic access to cancer treatment trials in the United States: Are studies located where patients live? JCO Oncology Practice, 20(3), 427–437.
+
+Tanner, A., Kim, S. H., Friedman, D. B., Foster, C., & Bergeron, C. D. (2015). Barriers to medical research participation as perceived by clinical trial investigators: Communicating with rural and African American communities. Journal of Health Communication, 20(1), 88–96. https://doi.org/10.1080/10810730.2014.908985
+
+Unger, J. M., Vaidya, R., Hershman, D. L., Minasian, L. M., & Fleury, M. E. (2019). Systematic review and meta-analysis of the magnitude of structural, clinical, and physician and patient barriers to cancer clinical trial participation. Journal of the National Cancer Institute, 111(3), 245–255.

@@ -1,0 +1,17 @@
+coverage_quartile,trial_category,trial_state_pairs
+Q1_low,behavioral,312
+Q1_low,device,182
+Q1_low,pharmacological,5565
+Q1_low,surgical,31
+Q2,behavioral,258
+Q2,device,158
+Q2,pharmacological,5456
+Q2,surgical,32
+Q3,behavioral,175
+Q3,device,92
+Q3,pharmacological,4100
+Q3,surgical,11
+Q4_high,behavioral,98
+Q4_high,device,46
+Q4_high,pharmacological,2873
+Q4_high,surgical,4

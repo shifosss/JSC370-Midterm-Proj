@@ -1,7 +1,7 @@
 ---
 title: "Option C - Clinical Trial Access Gap for Type 2 Diabetes"
 subtitle: "Analysis, exploratory results, and model-ready data products"
-author: ""
+author: "Chen Zhang"
 date: today
 format:
   html:
@@ -116,6 +116,17 @@ RESULTS.mkdir(parents=True, exist_ok=True)
 
 CENSUS_KEY = os.getenv("CENSUS_API_KEY", "")
 REQUEST_PAUSE_SEC = 0.2  # polite delay between API calls
+PRODUCT_RESULTS = pathlib.Path("../../product/results")
+PRODUCT_RESULTS.mkdir(parents=True, exist_ok=True)
+
+
+def csvs_cached(*paths):
+    """Return True if every path exists and is non-empty."""
+    for p in paths:
+        p = pathlib.Path(p)
+        if not p.exists() or p.stat().st_size == 0:
+            return False
+    return True
 
 US_STATE_ABBR = {
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC"
@@ -203,10 +214,13 @@ def tile_choropleth(df, value_col, title, cmap_name, out_name, vcenter=None):
     cbar.set_label(value_col)
 
     out_path = RESULTS / out_name
+    product_out_path = PRODUCT_RESULTS / out_name
     fig.tight_layout()
     fig.savefig(out_path, dpi=200)
+    fig.savefig(product_out_path, dpi=200)
     plt.show()
     print("Saved figure:", out_path)
+    print("Saved figure:", product_out_path)
 
 
 
@@ -272,178 +286,191 @@ This section captures the source trial portfolio, stores raw API pulls for prove
 #| label: ctgov-version-check
 #| output: false
 # Quick API version check for provenance tracking.
-version_url = "https://clinicaltrials.gov/api/v2/version"
-version_payload = request_json(version_url, timeout=30)
-save_json(RAW / "ct_version.json", version_payload)
-
-print("Saved:", RAW / "ct_version.json")
-print("Version payload keys:", list(version_payload.keys()))
+_CT_CSVS = [TEMP / f for f in ["ct_trials_flat.csv", "ct_sites_flat.csv", "ct_state_aggregates.csv", "ct_trial_state_pairs.csv"]]
+if csvs_cached(*_CT_CSVS):
+    print("[CACHE] CT.gov CSVs already cached; skipping version check.")
+else:
+    version_url = "https://clinicaltrials.gov/api/v2/version"
+    version_payload = request_json(version_url, timeout=30)
+    save_json(RAW / "ct_version.json", version_payload)
+    print("Saved:", RAW / "ct_version.json")
+    print("Version payload keys:", list(version_payload.keys()))
 ```
 
 ```{python}
 #| label: ctgov-fetch-us-diabetes-studies
 #| output: false
 # Pull all US type 2 diabetes studies with cursor pagination.
-CT_STUDIES_URL = "https://clinicaltrials.gov/api/v2/studies"
-BASE_PARAMS = {
-    "query.cond": "type 2 diabetes",
-    "query.locn": "United States",
-    "pageSize": 1000,
-    "countTotal": "true",
-}
+if csvs_cached(*_CT_CSVS):
+    print("[CACHE] CT.gov CSVs already cached; skipping API fetch.")
+else:
+    CT_STUDIES_URL = "https://clinicaltrials.gov/api/v2/studies"
+    BASE_PARAMS = {
+        "query.cond": "type 2 diabetes",
+        "query.locn": "United States",
+        "pageSize": 1000,
+        "countTotal": "true",
+    }
 
-next_page_token = None
-page_index = 0
-total_studies = 0
+    next_page_token = None
+    page_index = 0
+    total_studies = 0
 
-while True:
-    page_params = dict(BASE_PARAMS)
-    if next_page_token:
-        page_params["pageToken"] = next_page_token
+    while True:
+        page_params = dict(BASE_PARAMS)
+        if next_page_token:
+            page_params["pageToken"] = next_page_token
 
-    payload = request_json(CT_STUDIES_URL, params=page_params, timeout=60)
-    studies = payload.get("studies", [])
+        payload = request_json(CT_STUDIES_URL, params=page_params, timeout=60)
+        studies = payload.get("studies", [])
 
-    if not studies:
-        print("No studies returned; stopping.")
-        break
+        if not studies:
+            print("No studies returned; stopping.")
+            break
 
-    out_path = RAW / f"ct_diabetes_studies_page{page_index}.json"
-    save_json(out_path, payload)
-    total_studies += len(studies)
-    print(f"Saved page {page_index}: {len(studies)} studies -> {out_path.name}")
+        out_path = RAW / f"ct_diabetes_studies_page{page_index}.json"
+        save_json(out_path, payload)
+        total_studies += len(studies)
+        print(f"Saved page {page_index}: {len(studies)} studies -> {out_path.name}")
 
-    next_page_token = payload.get("nextPageToken")
-    if not next_page_token:
-        break
+        next_page_token = payload.get("nextPageToken")
+        if not next_page_token:
+            break
 
-    page_index += 1
-    time.sleep(REQUEST_PAUSE_SEC)
+        page_index += 1
+        time.sleep(REQUEST_PAUSE_SEC)
 
-print(f"Done. Total studies collected: {total_studies}")
+    print(f"Done. Total studies collected: {total_studies}")
 ```
 
 ```{python}
 #| label: ctgov-flatten-trials-and-sites
-page_files = sorted(RAW.glob("ct_diabetes_studies_page*.json"))
-if not page_files:
-    raise FileNotFoundError("No ClinicalTrials.gov page files found. Run the fetch cell first.")
+if csvs_cached(*_CT_CSVS):
+    print("[CACHE] Loading CT.gov data from CSV cache ...")
+    df_trials = pd.read_csv(TEMP / "ct_trials_flat.csv")
+    df_sites_us = pd.read_csv(TEMP / "ct_sites_flat.csv")
+    df_state_ct = pd.read_csv(TEMP / "ct_state_aggregates.csv")
+    df_trial_state = pd.read_csv(TEMP / "ct_trial_state_pairs.csv")
+else:
+    page_files = sorted(RAW.glob("ct_diabetes_studies_page*.json"))
+    if not page_files:
+        raise FileNotFoundError("No ClinicalTrials.gov page files found. Run the fetch cell first.")
 
 
-def extract_trial_and_site_rows(page_payload):
-    """Flatten one page into trial-level and site-level records."""
-    trial_rows = []
-    site_rows = []
+    def extract_trial_and_site_rows(page_payload):
+        """Flatten one page into trial-level and site-level records."""
+        trial_rows = []
+        site_rows = []
 
-    for study in page_payload.get("studies", []):
-        protocol = study.get("protocolSection", {})
-        ident_mod = protocol.get("identificationModule", {})
-        status_mod = protocol.get("statusModule", {})
-        design_mod = protocol.get("designModule", {})
-        sponsor_mod = protocol.get("sponsorCollaboratorsModule", {})
-        contacts_mod = protocol.get("contactsLocationsModule", {})
+        for study in page_payload.get("studies", []):
+            protocol = study.get("protocolSection", {})
+            ident_mod = protocol.get("identificationModule", {})
+            status_mod = protocol.get("statusModule", {})
+            design_mod = protocol.get("designModule", {})
+            sponsor_mod = protocol.get("sponsorCollaboratorsModule", {})
+            contacts_mod = protocol.get("contactsLocationsModule", {})
 
-        nct_id = ident_mod.get("nctId")
-        if not nct_id:
-            continue
-
-        title = ident_mod.get("officialTitle") or ident_mod.get("briefTitle") or ""
-        lead_sponsor = sponsor_mod.get("leadSponsor", {}) if isinstance(sponsor_mod, dict) else {}
-        sponsor_class = str(lead_sponsor.get("class", "")).upper()
-
-        phases = design_mod.get("phases", [])
-        phase_text = ", ".join(phases) if isinstance(phases, list) else str(phases)
-
-        trial_rows.append(
-            {
-                "nct_id": nct_id,
-                "official_title": title,
-                "overall_status": status_mod.get("overallStatus"),
-                "phase": phase_text,
-                "lead_sponsor_class": sponsor_class,
-                "is_industry": 1 if sponsor_class == "INDUSTRY" else 0,
-            }
-        )
-
-        locations = contacts_mod.get("locations", []) if isinstance(contacts_mod, dict) else []
-        if not isinstance(locations, list):
-            locations = []
-
-        for location in locations:
-            country = str(location.get("country", "")).strip().upper()
-            if country and country not in {"UNITED STATES", "US", "USA"}:
+            nct_id = ident_mod.get("nctId")
+            if not nct_id:
                 continue
 
-            site_rows.append(
+            title = ident_mod.get("officialTitle") or ident_mod.get("briefTitle") or ""
+            lead_sponsor = sponsor_mod.get("leadSponsor", {}) if isinstance(sponsor_mod, dict) else {}
+            sponsor_class = str(lead_sponsor.get("class", "")).upper()
+
+            phases = design_mod.get("phases", [])
+            phase_text = ", ".join(phases) if isinstance(phases, list) else str(phases)
+
+            trial_rows.append(
                 {
                     "nct_id": nct_id,
-                    "state": normalize_state(location.get("state")),
-                    "state_raw": location.get("state"),
-                    "country": country,
-                    "facility": location.get("facility"),
-                    "city": location.get("city"),
+                    "official_title": title,
+                    "overall_status": status_mod.get("overallStatus"),
+                    "phase": phase_text,
+                    "lead_sponsor_class": sponsor_class,
+                    "is_industry": 1 if sponsor_class == "INDUSTRY" else 0,
                 }
             )
 
-    return trial_rows, site_rows
+            locations = contacts_mod.get("locations", []) if isinstance(contacts_mod, dict) else []
+            if not isinstance(locations, list):
+                locations = []
+
+            for location in locations:
+                country = str(location.get("country", "")).strip().upper()
+                if country and country not in {"UNITED STATES", "US", "USA"}:
+                    continue
+
+                site_rows.append(
+                    {
+                        "nct_id": nct_id,
+                        "state": normalize_state(location.get("state")),
+                        "state_raw": location.get("state"),
+                        "country": country,
+                        "facility": location.get("facility"),
+                        "city": location.get("city"),
+                    }
+                )
+
+        return trial_rows, site_rows
 
 
-trial_rows = []
-site_rows = []
-for page_file in page_files:
-    payload = json.loads(page_file.read_text(encoding="utf-8"))
-    page_trial_rows, page_site_rows = extract_trial_and_site_rows(payload)
-    trial_rows.extend(page_trial_rows)
-    site_rows.extend(page_site_rows)
+    trial_rows = []
+    site_rows = []
+    for page_file in page_files:
+        payload = json.loads(page_file.read_text(encoding="utf-8"))
+        page_trial_rows, page_site_rows = extract_trial_and_site_rows(payload)
+        trial_rows.extend(page_trial_rows)
+        site_rows.extend(page_site_rows)
 
-# Trial table (one row per NCT ID)
-df_trials = pd.DataFrame(trial_rows).drop_duplicates(subset=["nct_id"]).copy()
+    # Trial table (one row per NCT ID)
+    df_trials = pd.DataFrame(trial_rows).drop_duplicates(subset=["nct_id"]).copy()
 
-# Site table (one row per location entry)
-df_sites = pd.DataFrame(site_rows)
-df_sites_us = df_sites.dropna(subset=["nct_id", "state"]).copy()
-df_sites_us = df_sites_us[df_sites_us["state"].isin(US_STATE_ABBR)].copy()
-df_sites_unique = df_sites_us.drop_duplicates(subset=["nct_id", "state"]).copy()
+    # Site table (one row per location entry)
+    df_sites = pd.DataFrame(site_rows)
+    df_sites_us = df_sites.dropna(subset=["nct_id", "state"]).copy()
+    df_sites_us = df_sites_us[df_sites_us["state"].isin(US_STATE_ABBR)].copy()
+    df_sites_unique = df_sites_us.drop_duplicates(subset=["nct_id", "state"]).copy()
 
-# State-level counts for report tables.
-state_trial_count = (
-    df_sites_unique.groupby("state", as_index=False)["nct_id"]
-    .nunique()
-    .rename(columns={"state": "stateabbr", "nct_id": "trial_count"})
-)
-state_site_count = (
-    df_sites_us.groupby("state", as_index=False)
-    .size()
-    .rename(columns={"state": "stateabbr", "size": "site_count"})
-)
-
-df_state_ct = (
-    pd.DataFrame({"stateabbr": sorted(US_STATE_ABBR)})
-    .merge(state_trial_count, on="stateabbr", how="left")
-    .merge(state_site_count, on="stateabbr", how="left")
-)
-for col in ["trial_count", "site_count"]:
-    df_state_ct[col] = df_state_ct[col].fillna(0).astype(int)
-
-# State-trial pairs used by sponsor/phase/status stratified summaries.
-df_trial_state = (
-    df_sites_unique.rename(columns={"state": "stateabbr"})[["nct_id", "stateabbr"]]
-    .drop_duplicates()
-    .merge(
-        df_trials[["nct_id", "is_industry", "lead_sponsor_class", "overall_status", "phase"]],
-        on="nct_id",
-        how="left",
+    # State-level counts for report tables.
+    state_trial_count = (
+        df_sites_unique.groupby("state", as_index=False)["nct_id"]
+        .nunique()
+        .rename(columns={"state": "stateabbr", "nct_id": "trial_count"})
     )
-)
-df_trial_state["sponsor_group"] = np.where(df_trial_state["is_industry"] == 1, "INDUSTRY", "NON_INDUSTRY")
-df_trial_state["status_group"] = df_trial_state["overall_status"].fillna("UNKNOWN").astype(str).str.upper()
-df_trial_state["phase_group"] = df_trial_state["phase"].apply(phase_group)
+    state_site_count = (
+        df_sites_us.groupby("state", as_index=False)
+        .size()
+        .rename(columns={"state": "stateabbr", "size": "site_count"})
+    )
 
-# Persist flattened outputs for reproducibility and downstream joins.
-df_trials.to_csv(TEMP / "ct_trials_flat.csv", index=False)
-df_sites_us.to_csv(TEMP / "ct_sites_flat.csv", index=False)
-df_state_ct.to_csv(TEMP / "ct_state_aggregates.csv", index=False)
-df_trial_state.to_csv(TEMP / "ct_trial_state_pairs.csv", index=False)
+    df_state_ct = (
+        pd.DataFrame({"stateabbr": sorted(US_STATE_ABBR)})
+        .merge(state_trial_count, on="stateabbr", how="left")
+        .merge(state_site_count, on="stateabbr", how="left")
+    )
+    for col in ["trial_count", "site_count"]:
+        df_state_ct[col] = df_state_ct[col].fillna(0).astype(int)
+
+    # State-trial pairs used by sponsor/phase/status stratified summaries.
+    df_trial_state = (
+        df_sites_unique.rename(columns={"state": "stateabbr"})[["nct_id", "stateabbr"]]
+        .drop_duplicates()
+        .merge(
+            df_trials[["nct_id", "is_industry", "lead_sponsor_class", "overall_status", "phase"]],
+            on="nct_id",
+            how="left",
+        )
+    )
+    df_trial_state["sponsor_group"] = np.where(df_trial_state["is_industry"] == 1, "INDUSTRY", "NON_INDUSTRY")
+    df_trial_state["status_group"] = df_trial_state["overall_status"].fillna("UNKNOWN").astype(str).str.upper()
+    df_trial_state["phase_group"] = df_trial_state["phase"].apply(phase_group)
+
+    # Persist flattened outputs for reproducibility and downstream joins.
+    df_trials.to_csv(TEMP / "ct_trials_flat.csv", index=False)
+    df_sites_us.to_csv(TEMP / "ct_sites_flat.csv", index=False)
+    df_state_ct.to_csv(TEMP / "ct_state_aggregates.csv", index=False)
+    df_trial_state.to_csv(TEMP / "ct_trial_state_pairs.csv", index=False)
 
 print("Trials rows:", len(df_trials))
 print("US site rows:", len(df_sites_us))
@@ -460,204 +487,207 @@ The trial inventory is joined to disease burden and contextual covariates using 
 #| label: cdc-places-state-pull
 #| output: false
 # Pull selected PLACES measures and aggregate county rows to state-level estimates.
-PLACES_MEASURES = [
-    "DIABETES", "ACCESS2", "LACKTRPT", "FOODINSECU", "HOUSINSECU",
-    "FOODSTAMP", "GHLTH", "BPHIGH", "OBESITY", "MHLTH", "DEPRESSION", "LPA", "LONELINESS",
-]
+_CDC_STATE_CSVS = [TEMP / "cdc_diabetes_state_latest.csv", TEMP / "cdc_places_wide_state.csv"]
+if csvs_cached(*_CDC_STATE_CSVS):
+    print("[CACHE] Loading CDC PLACES state data from CSV cache ...")
+    df_cdc_latest = pd.read_csv(TEMP / "cdc_diabetes_state_latest.csv")
+    df_cdc_wide = pd.read_csv(TEMP / "cdc_places_wide_state.csv")
+else:
+    PLACES_MEASURES = [
+        "DIABETES", "ACCESS2", "LACKTRPT", "FOODINSECU", "HOUSINSECU",
+        "FOODSTAMP", "GHLTH", "BPHIGH", "OBESITY", "MHLTH", "DEPRESSION", "LPA", "LONELINESS",
+    ]
 
-CDC_PLACES_URL = "https://data.cdc.gov/resource/swc5-untb.json"
-measure_filter = ",".join(f"'{m}'" for m in PLACES_MEASURES)
-where_clause = f"measureid IN ({measure_filter}) AND datavaluetypeid='AgeAdjPrv'"
+    CDC_PLACES_URL = "https://data.cdc.gov/resource/swc5-untb.json"
+    measure_filter = ",".join(f"'{m}'" for m in PLACES_MEASURES)
+    where_clause = f"measureid IN ({measure_filter}) AND datavaluetypeid='AgeAdjPrv'"
 
-cdc_rows = fetch_socrata_rows(
-    CDC_PLACES_URL,
-    where_clause=where_clause,
-    order_by="stateabbr,locationid,measureid,year",
-    limit=10_000,
-    timeout=60,
-    sleep_sec=REQUEST_PAUSE_SEC,
-)
-save_json(RAW / "cdc_places_multi_state.json", cdc_rows)
-
-if not cdc_rows:
-    raise ValueError("CDC PLACES API returned no rows.")
-
-df_cdc_all = pd.DataFrame(cdc_rows)
-df_cdc_all.columns = [c.lower() for c in df_cdc_all.columns]
-
-for col in ["year", "data_value", "low_confidence_limit", "high_confidence_limit", "totalpopulation", "totalpop18plus"]:
-    if col in df_cdc_all.columns:
-        df_cdc_all[col] = pd.to_numeric(df_cdc_all[col], errors="coerce")
-
-df_cdc_all["stateabbr"] = df_cdc_all["stateabbr"].astype(str).str.upper()
-df_cdc_all = df_cdc_all[df_cdc_all["stateabbr"].isin(US_STATE_ABBR)].copy()
-
-# Keep latest year for each county x measure, then aggregate county rows to state.
-df_latest_county = (
-    df_cdc_all.sort_values(["stateabbr", "locationid", "measureid", "year"])
-    .drop_duplicates(subset=["stateabbr", "locationid", "measureid"], keep="last")
-)
-
-# Use adult population when available; fallback to total population.
-df_latest_county["weight"] = df_latest_county["totalpop18plus"].where(
-    df_latest_county["totalpop18plus"] > 0,
-    df_latest_county["totalpopulation"],
-)
-
-
-def weighted_state_average(group):
-    vals = pd.to_numeric(group["data_value"], errors="coerce")
-    wts = pd.to_numeric(group["weight"], errors="coerce")
-    mask = vals.notna() & wts.notna() & (wts > 0)
-    if mask.any():
-        return np.average(vals[mask], weights=wts[mask])
-    return vals.mean(skipna=True)
-
-
-df_state_measure = (
-    df_latest_county.groupby(["stateabbr", "measureid"])
-    .apply(lambda g: weighted_state_average(g))
-    .reset_index(name="data_value")
-)
-
-# Build wide feature table.
-df_cdc_wide = (
-    df_state_measure.pivot(index="stateabbr", columns="measureid", values="data_value")
-    .reset_index()
-)
-df_cdc_wide.columns.name = None
-df_cdc_wide = df_cdc_wide.rename(columns={
-    c: f"places_{c.lower()}" for c in df_cdc_wide.columns if c != "stateabbr"
-})
-
-# Keep diabetes prevalence + aggregated CI columns for backward compatibility.
-diab_rows = df_latest_county[df_latest_county["measureid"] == "DIABETES"].copy()
-
-def weighted_col(group, col):
-    vals = pd.to_numeric(group[col], errors="coerce")
-    wts = pd.to_numeric(group["weight"], errors="coerce")
-    mask = vals.notna() & wts.notna() & (wts > 0)
-    if mask.any():
-        return np.average(vals[mask], weights=wts[mask])
-    return vals.mean(skipna=True)
-
-
-df_cdc_latest = (
-    diab_rows.groupby("stateabbr")
-    .apply(
-        lambda g: pd.Series(
-            {
-                "year": int(g["year"].max()) if g["year"].notna().any() else np.nan,
-                "diabetes_prevalence": weighted_col(g, "data_value"),
-                "diabetes_low_ci": weighted_col(g, "low_confidence_limit") if "low_confidence_limit" in g.columns else np.nan,
-                "diabetes_high_ci": weighted_col(g, "high_confidence_limit") if "high_confidence_limit" in g.columns else np.nan,
-            }
-        )
+    cdc_rows = fetch_socrata_rows(
+        CDC_PLACES_URL,
+        where_clause=where_clause,
+        order_by="stateabbr,locationid,measureid,year",
+        limit=10_000,
+        timeout=60,
+        sleep_sec=REQUEST_PAUSE_SEC,
     )
-    .reset_index()
-)
+    save_json(RAW / "cdc_places_multi_state.json", cdc_rows)
 
-# Persist both tables.
-df_cdc_latest.to_csv(TEMP / "cdc_diabetes_state_latest.csv", index=False)
-df_cdc_wide.to_csv(TEMP / "cdc_places_wide_state.csv", index=False)
+    if not cdc_rows:
+        raise ValueError("CDC PLACES API returned no rows.")
 
-print("Measures fetched:", sorted(df_cdc_all["measureid"].dropna().unique().tolist()))
+    df_cdc_all = pd.DataFrame(cdc_rows)
+    df_cdc_all.columns = [c.lower() for c in df_cdc_all.columns]
+
+    for col in ["year", "data_value", "low_confidence_limit", "high_confidence_limit", "totalpopulation", "totalpop18plus"]:
+        if col in df_cdc_all.columns:
+            df_cdc_all[col] = pd.to_numeric(df_cdc_all[col], errors="coerce")
+
+    df_cdc_all["stateabbr"] = df_cdc_all["stateabbr"].astype(str).str.upper()
+    df_cdc_all = df_cdc_all[df_cdc_all["stateabbr"].isin(US_STATE_ABBR)].copy()
+
+    # Keep latest year for each county x measure, then aggregate county rows to state.
+    df_latest_county = (
+        df_cdc_all.sort_values(["stateabbr", "locationid", "measureid", "year"])
+        .drop_duplicates(subset=["stateabbr", "locationid", "measureid"], keep="last")
+    )
+
+    # Use adult population when available; fallback to total population.
+    df_latest_county["weight"] = df_latest_county["totalpop18plus"].where(
+        df_latest_county["totalpop18plus"] > 0,
+        df_latest_county["totalpopulation"],
+    )
+
+    def weighted_state_average(group):
+        vals = pd.to_numeric(group["data_value"], errors="coerce")
+        wts = pd.to_numeric(group["weight"], errors="coerce")
+        mask = vals.notna() & wts.notna() & (wts > 0)
+        if mask.any():
+            return np.average(vals[mask], weights=wts[mask])
+        return vals.mean(skipna=True)
+
+    df_state_measure = (
+        df_latest_county.groupby(["stateabbr", "measureid"])
+        .apply(lambda g: weighted_state_average(g))
+        .reset_index(name="data_value")
+    )
+
+    # Build wide feature table.
+    df_cdc_wide = (
+        df_state_measure.pivot(index="stateabbr", columns="measureid", values="data_value")
+        .reset_index()
+    )
+    df_cdc_wide.columns.name = None
+    df_cdc_wide = df_cdc_wide.rename(columns={
+        c: f"places_{c.lower()}" for c in df_cdc_wide.columns if c != "stateabbr"
+    })
+
+    # Keep diabetes prevalence + aggregated CI columns for backward compatibility.
+    diab_rows = df_latest_county[df_latest_county["measureid"] == "DIABETES"].copy()
+
+    def weighted_col(group, col):
+        vals = pd.to_numeric(group[col], errors="coerce")
+        wts = pd.to_numeric(group["weight"], errors="coerce")
+        mask = vals.notna() & wts.notna() & (wts > 0)
+        if mask.any():
+            return np.average(vals[mask], weights=wts[mask])
+        return vals.mean(skipna=True)
+
+    df_cdc_latest = (
+        diab_rows.groupby("stateabbr")
+        .apply(
+            lambda g: pd.Series(
+                {
+                    "year": int(g["year"].max()) if g["year"].notna().any() else np.nan,
+                    "diabetes_prevalence": weighted_col(g, "data_value"),
+                    "diabetes_low_ci": weighted_col(g, "low_confidence_limit") if "low_confidence_limit" in g.columns else np.nan,
+                    "diabetes_high_ci": weighted_col(g, "high_confidence_limit") if "high_confidence_limit" in g.columns else np.nan,
+                }
+            )
+        )
+        .reset_index()
+    )
+
+    # Persist both tables.
+    df_cdc_latest.to_csv(TEMP / "cdc_diabetes_state_latest.csv", index=False)
+    df_cdc_wide.to_csv(TEMP / "cdc_places_wide_state.csv", index=False)
+
 print("CDC wide shape:", df_cdc_wide.shape)
-print("Saved:", TEMP / "cdc_diabetes_state_latest.csv")
-print("Saved:", TEMP / "cdc_places_wide_state.csv")
 df_cdc_latest.head()
 ```
 
 ```{python}
 #| label: acs-state-features
 #| output: false
-acs_url = "https://api.census.gov/data/2022/acs/acs5"
-acs_subj_url = "https://api.census.gov/data/2022/acs/acs5/subject"
+if csvs_cached(TEMP / "acs_state_2022_features.csv"):
+    print("[CACHE] Loading ACS state features from CSV cache ...")
+    df_acs_features = pd.read_csv(TEMP / "acs_state_2022_features.csv")
+else:
+    acs_url = "https://api.census.gov/data/2022/acs/acs5"
+    acs_subj_url = "https://api.census.gov/data/2022/acs/acs5/subject"
 
-# ACS B-table variables (counts and universes used to build rates).
-acs_vars = [
-    "B01003_001E",  # total population
-    "B17001_001E",  # poverty universe
-    "B17001_002E",  # below poverty
-    "B19013_001E",  # median household income
-    "B19083_001E",  # gini coefficient
-    "B02001_003E",  # Black or African American population
-    "B02001_001E",  # race universe
-    "B03001_003E",  # Hispanic or Latino population
-    "B03001_001E",  # Hispanic universe
-    "B25044_003E",  # owner-occupied no vehicle
-    "B25044_010E",  # renter-occupied no vehicle
-    "B25044_001E",  # total occupied housing units
-    "B28002_013E",  # no internet subscription
-    "B28002_001E",  # internet universe
-    "B23025_005E",  # unemployed
-    "B23025_001E",  # labor universe
-]
+    # ACS B-table variables (counts and universes used to build rates).
+    acs_vars = [
+        "B01003_001E",  # total population
+        "B17001_001E",  # poverty universe
+        "B17001_002E",  # below poverty
+        "B19013_001E",  # median household income
+        "B19083_001E",  # gini coefficient
+        "B02001_003E",  # Black or African American population
+        "B02001_001E",  # race universe
+        "B03001_003E",  # Hispanic or Latino population
+        "B03001_001E",  # Hispanic universe
+        "B25044_003E",  # owner-occupied no vehicle
+        "B25044_010E",  # renter-occupied no vehicle
+        "B25044_001E",  # total occupied housing units
+        "B28002_013E",  # no internet subscription
+        "B28002_001E",  # internet universe
+        "B23025_005E",  # unemployed
+        "B23025_001E",  # labor universe
+    ]
 
+    def fetch_acs_payload(base_url, variables, raw_filename):
+        params = {"get": ",".join(variables), "for": "state:*"}
+        if CENSUS_KEY:
+            params["key"] = CENSUS_KEY
 
-def fetch_acs_payload(base_url, variables, raw_filename):
-    params = {"get": ",".join(variables), "for": "state:*"}
-    if CENSUS_KEY:
-        params["key"] = CENSUS_KEY
+        payload = request_json(base_url, params=params, timeout=60)
+        save_json(RAW / raw_filename, payload)
 
-    payload = request_json(base_url, params=params, timeout=60)
-    save_json(RAW / raw_filename, payload)
+        if not payload or len(payload) < 2:
+            raise ValueError(f"ACS API returned empty payload for {raw_filename}")
 
-    if not payload or len(payload) < 2:
-        raise ValueError(f"ACS API returned empty payload for {raw_filename}")
+        return payload
 
-    return payload
+    # Step 1: pull ACS B-table payload and derive core socioeconomic features.
+    acs_payload = fetch_acs_payload(acs_url, acs_vars, "acs_state_2022.json")
+    df_acs = pd.DataFrame(acs_payload[1:], columns=acs_payload[0])
+    for col in acs_vars:
+        df_acs[col] = pd.to_numeric(df_acs[col], errors="coerce")
 
+    df_acs["stateabbr"] = df_acs["state"].map(FIPS_TO_ABBR)
+    df_acs["population"] = df_acs["B01003_001E"]
+    df_acs["poverty_rate"] = safe_percent(df_acs["B17001_002E"], df_acs["B17001_001E"])
+    df_acs["median_income"] = df_acs["B19013_001E"]
+    df_acs["gini"] = df_acs["B19083_001E"]
+    df_acs["pct_black"] = safe_percent(df_acs["B02001_003E"], df_acs["B02001_001E"])
+    df_acs["pct_hispanic"] = safe_percent(df_acs["B03001_003E"], df_acs["B03001_001E"])
+    df_acs["pct_no_vehicle"] = safe_percent(
+        df_acs["B25044_003E"] + df_acs["B25044_010E"],
+        df_acs["B25044_001E"],
+    )
+    df_acs["pct_no_internet"] = safe_percent(df_acs["B28002_013E"], df_acs["B28002_001E"])
+    df_acs["unemployment_rate"] = safe_percent(df_acs["B23025_005E"], df_acs["B23025_001E"])
 
-# Step 1: pull ACS B-table payload and derive core socioeconomic features.
-acs_payload = fetch_acs_payload(acs_url, acs_vars, "acs_state_2022.json")
-df_acs = pd.DataFrame(acs_payload[1:], columns=acs_payload[0])
-for col in acs_vars:
-    df_acs[col] = pd.to_numeric(df_acs[col], errors="coerce")
+    # Step 2: pull ACS Subject tables for uninsured and education percentages.
+    acs_subj_vars = [
+        "S2701_C05_001E",  # uninsured %
+        "S1501_C02_015E",  # bachelor's+ %
+    ]
+    subj_payload = fetch_acs_payload(acs_subj_url, acs_subj_vars, "acs_state_2022_subject.json")
+    df_subj = pd.DataFrame(subj_payload[1:], columns=subj_payload[0])
+    df_subj["S2701_C05_001E"] = pd.to_numeric(df_subj["S2701_C05_001E"], errors="coerce")
+    df_subj["S1501_C02_015E"] = pd.to_numeric(df_subj["S1501_C02_015E"], errors="coerce")
+    df_subj["stateabbr"] = df_subj["state"].map(FIPS_TO_ABBR)
+    df_subj = (
+        df_subj[["stateabbr", "S2701_C05_001E", "S1501_C02_015E"]]
+        .rename(columns={"S2701_C05_001E": "uninsured_pct", "S1501_C02_015E": "pct_bachelors_plus"})
+    )
 
-df_acs["stateabbr"] = df_acs["state"].map(FIPS_TO_ABBR)
-df_acs["population"] = df_acs["B01003_001E"]
-df_acs["poverty_rate"] = safe_percent(df_acs["B17001_002E"], df_acs["B17001_001E"])
-df_acs["median_income"] = df_acs["B19013_001E"]
-df_acs["gini"] = df_acs["B19083_001E"]
-df_acs["pct_black"] = safe_percent(df_acs["B02001_003E"], df_acs["B02001_001E"])
-df_acs["pct_hispanic"] = safe_percent(df_acs["B03001_003E"], df_acs["B03001_001E"])
-df_acs["pct_no_vehicle"] = safe_percent(
-    df_acs["B25044_003E"] + df_acs["B25044_010E"],
-    df_acs["B25044_001E"],
-)
-df_acs["pct_no_internet"] = safe_percent(df_acs["B28002_013E"], df_acs["B28002_001E"])
-df_acs["unemployment_rate"] = safe_percent(df_acs["B23025_005E"], df_acs["B23025_001E"])
+    # Step 3: combine all ACS-derived state features.
+    acs_btable_cols = [
+        "stateabbr", "population", "poverty_rate", "median_income", "gini",
+        "pct_black", "pct_hispanic", "pct_no_vehicle", "pct_no_internet", "unemployment_rate",
+    ]
+    df_acs_features = (
+        df_acs[acs_btable_cols]
+        .copy()
+        .query("stateabbr in @US_STATE_ABBR")
+        .merge(df_subj[df_subj["stateabbr"].isin(US_STATE_ABBR)], on="stateabbr", how="left")
+    )
 
-# Step 2: pull ACS Subject tables for uninsured and education percentages.
-acs_subj_vars = [
-    "S2701_C05_001E",  # uninsured %
-    "S1501_C02_015E",  # bachelor's+ %
-]
-subj_payload = fetch_acs_payload(acs_subj_url, acs_subj_vars, "acs_state_2022_subject.json")
-df_subj = pd.DataFrame(subj_payload[1:], columns=subj_payload[0])
-df_subj["S2701_C05_001E"] = pd.to_numeric(df_subj["S2701_C05_001E"], errors="coerce")
-df_subj["S1501_C02_015E"] = pd.to_numeric(df_subj["S1501_C02_015E"], errors="coerce")
-df_subj["stateabbr"] = df_subj["state"].map(FIPS_TO_ABBR)
-df_subj = (
-    df_subj[["stateabbr", "S2701_C05_001E", "S1501_C02_015E"]]
-    .rename(columns={"S2701_C05_001E": "uninsured_pct", "S1501_C02_015E": "pct_bachelors_plus"})
-)
+    df_acs_features.to_csv(TEMP / "acs_state_2022_features.csv", index=False)
+    print("Saved ACS features:", TEMP / "acs_state_2022_features.csv")
 
-# Step 3: combine all ACS-derived state features.
-acs_btable_cols = [
-    "stateabbr", "population", "poverty_rate", "median_income", "gini",
-    "pct_black", "pct_hispanic", "pct_no_vehicle", "pct_no_internet", "unemployment_rate",
-]
-df_acs_features = (
-    df_acs[acs_btable_cols]
-    .copy()
-    .query("stateabbr in @US_STATE_ABBR")
-    .merge(df_subj[df_subj["stateabbr"].isin(US_STATE_ABBR)], on="stateabbr", how="left")
-)
-
-df_acs_features.to_csv(TEMP / "acs_state_2022_features.csv", index=False)
-print("Saved ACS features:", TEMP / "acs_state_2022_features.csv")
 print("ACS shape:", df_acs_features.shape)
 df_acs_features.head()
 ```
@@ -665,29 +695,33 @@ df_acs_features.head()
 ```{python}
 #| label: rural-share-state
 #| output: false
-# Census 2020 Decennial P2 table: rural population share by state.
-dec_url = "https://api.census.gov/data/2020/dec/pl"
-dec_params = {"get": "P2_005N,P2_001N", "for": "state:*"}
-if CENSUS_KEY:
-    dec_params["key"] = CENSUS_KEY
+if csvs_cached(TEMP / "rural_pct_state_2020.csv"):
+    print("[CACHE] Loading rural share from CSV cache ...")
+    df_rural = pd.read_csv(TEMP / "rural_pct_state_2020.csv")
+else:
+    # Census 2020 Decennial P2 table: rural population share by state.
+    dec_url = "https://api.census.gov/data/2020/dec/pl"
+    dec_params = {"get": "P2_005N,P2_001N", "for": "state:*"}
+    if CENSUS_KEY:
+        dec_params["key"] = CENSUS_KEY
 
-dec_payload = request_json(dec_url, params=dec_params, timeout=60)
-save_json(RAW / "decennial_2020_rural.json", dec_payload)
+    dec_payload = request_json(dec_url, params=dec_params, timeout=60)
+    save_json(RAW / "decennial_2020_rural.json", dec_payload)
 
-if not dec_payload or len(dec_payload) < 2:
-    raise ValueError("Census Decennial P2 API returned empty payload.")
+    if not dec_payload or len(dec_payload) < 2:
+        raise ValueError("Census Decennial P2 API returned empty payload.")
 
-df_dec = pd.DataFrame(dec_payload[1:], columns=dec_payload[0])
-df_dec["P2_005N"] = pd.to_numeric(df_dec["P2_005N"], errors="coerce")  # rural pop
-df_dec["P2_001N"] = pd.to_numeric(df_dec["P2_001N"], errors="coerce")  # total pop
-df_dec["stateabbr"] = df_dec["state"].map(FIPS_TO_ABBR)
-df_dec["pct_rural"] = safe_percent(df_dec["P2_005N"], df_dec["P2_001N"])
+    df_dec = pd.DataFrame(dec_payload[1:], columns=dec_payload[0])
+    df_dec["P2_005N"] = pd.to_numeric(df_dec["P2_005N"], errors="coerce")  # rural pop
+    df_dec["P2_001N"] = pd.to_numeric(df_dec["P2_001N"], errors="coerce")  # total pop
+    df_dec["stateabbr"] = df_dec["state"].map(FIPS_TO_ABBR)
+    df_dec["pct_rural"] = safe_percent(df_dec["P2_005N"], df_dec["P2_001N"])
 
-df_rural = df_dec[["stateabbr", "pct_rural"]].copy()
-df_rural = df_rural[df_rural["stateabbr"].isin(US_STATE_ABBR)].copy()
-df_rural.to_csv(TEMP / "rural_pct_state_2020.csv", index=False)
+    df_rural = df_dec[["stateabbr", "pct_rural"]].copy()
+    df_rural = df_rural[df_rural["stateabbr"].isin(US_STATE_ABBR)].copy()
+    df_rural.to_csv(TEMP / "rural_pct_state_2020.csv", index=False)
+    print("Saved rural pct:", TEMP / "rural_pct_state_2020.csv")
 
-print("Saved rural pct:", TEMP / "rural_pct_state_2020.csv")
 print("Rural shape:", df_rural.shape)
 df_rural.sort_values("pct_rural", ascending=False).head(10)
 ```
@@ -695,20 +729,24 @@ df_rural.sort_values("pct_rural", ascending=False).head(10)
 ```{python}
 #| label: medicaid-expansion-state
 #| output: false
-# Medicaid expansion status (as of Jan 2024)
-# Source: KFF State Health Facts — 40 states + DC = 41 have expanded; 10 have not.
-# Non-expansion states (10): AL, FL, GA, KS, MS, SC, TN, TX, WI, WY
-MEDICAID_NON_EXPANDED = {"AL", "FL", "GA", "KS", "MS", "SC", "TN", "TX", "WI", "WY"}
+if csvs_cached(TEMP / "medicaid_expansion_status.csv"):
+    print("[CACHE] Loading Medicaid expansion status from CSV cache ...")
+    df_medicaid = pd.read_csv(TEMP / "medicaid_expansion_status.csv")
+else:
+    # Medicaid expansion status (as of Jan 2024)
+    # Source: KFF State Health Facts — 40 states + DC = 41 have expanded; 10 have not.
+    # Non-expansion states (10): AL, FL, GA, KS, MS, SC, TN, TX, WI, WY
+    MEDICAID_NON_EXPANDED = {"AL", "FL", "GA", "KS", "MS", "SC", "TN", "TX", "WI", "WY"}
 
-df_medicaid = pd.DataFrame({"stateabbr": sorted(US_STATE_ABBR)})
-df_medicaid["medicaid_expanded"] = df_medicaid["stateabbr"].apply(
-    lambda s: 0 if s in MEDICAID_NON_EXPANDED else 1
-)
-df_medicaid.to_csv(TEMP / "medicaid_expansion_status.csv", index=False)
+    df_medicaid = pd.DataFrame({"stateabbr": sorted(US_STATE_ABBR)})
+    df_medicaid["medicaid_expanded"] = df_medicaid["stateabbr"].apply(
+        lambda s: 0 if s in MEDICAID_NON_EXPANDED else 1
+    )
+    df_medicaid.to_csv(TEMP / "medicaid_expansion_status.csv", index=False)
+    print("Saved:", TEMP / "medicaid_expansion_status.csv")
 
 print(f"Expansion states: {df_medicaid['medicaid_expanded'].sum()}")
 print(f"Non-expansion states: {(df_medicaid['medicaid_expanded'] == 0).sum()}")
-print("Saved:", TEMP / "medicaid_expansion_status.csv")
 df_medicaid[df_medicaid["medicaid_expanded"] == 0]
 ```
 
@@ -719,94 +757,105 @@ This section assembles the state-level coverage table and the intermediate densi
 ```{python}
 #| label: state-coverage-alignment
 #| output: false
-# Assemble one row per state with trial burden, density, and socioeconomic context.
-df_final = (
-    pd.DataFrame({"stateabbr": sorted(US_STATE_ABBR)})
-    .merge(df_state_ct, on="stateabbr", how="left")
-    .merge(df_cdc_latest, on="stateabbr", how="left")
-    .merge(df_cdc_wide, on="stateabbr", how="left")
-    .merge(df_acs_features, on="stateabbr", how="left")
-    .merge(df_rural, on="stateabbr", how="left")
-    .merge(df_medicaid, on="stateabbr", how="left")
-)
-for col in ["trial_count", "site_count"]:
-    df_final[col] = df_final[col].fillna(0).astype(int)
-
-df_final["trials_per_100k"] = safe_rate_per_100k(df_final["trial_count"], df_final["population"])
-
-
-def build_state_density(df_pairs, group_col):
-    """Build state-level trial density table for one grouping variable."""
-    out = (
-        df_pairs.groupby(["stateabbr", group_col], as_index=False)["nct_id"]
-        .nunique()
-        .rename(columns={"nct_id": "trial_count"})
-    )
-    out = out.merge(df_acs_features[["stateabbr", "population"]], on="stateabbr", how="left")
-    out["trials_per_100k"] = safe_rate_per_100k(out["trial_count"], out["population"])
-    return out
-
-
-# Stratified density tables reused later in EDA and modeling exports.
-state_sponsor = build_state_density(df_trial_state, "sponsor_group")
-state_status = build_state_density(df_trial_state, "status_group")
-state_phase = build_state_density(df_trial_state, "phase_group")
-
-# Pull sponsor-specific trial counts into the main state table.
-sponsor_counts = (
-    state_sponsor.pivot_table(index="stateabbr", columns="sponsor_group", values="trial_count", aggfunc="first")
-    .rename(columns={"INDUSTRY": "industry_trial_count", "NON_INDUSTRY": "non_industry_trial_count"})
-    .reset_index()
-)
-for col in ["industry_trial_count", "non_industry_trial_count"]:
-    if col not in sponsor_counts.columns:
-        sponsor_counts[col] = 0
-
-df_final = df_final.merge(
-    sponsor_counts[["stateabbr", "industry_trial_count", "non_industry_trial_count"]],
-    on="stateabbr",
-    how="left",
-)
-for col in ["industry_trial_count", "non_industry_trial_count"]:
-    df_final[col] = df_final[col].fillna(0).astype(int)
-
-df_final["industry_trials_per_100k"] = safe_rate_per_100k(df_final["industry_trial_count"], df_final["population"])
-df_final["non_industry_trials_per_100k"] = safe_rate_per_100k(df_final["non_industry_trial_count"], df_final["population"])
-df_final["industry_pct"] = np.where(
-    df_final["trial_count"] > 0,
-    100.0 * df_final["industry_trial_count"] / df_final["trial_count"],
-    np.nan,
-)
-
-# Coverage residual = observed density - expected density within burden decile.
-df_final["burden_decile"] = pd.qcut(df_final["diabetes_prevalence"], q=10, labels=False, duplicates="drop")
-df_final["burden_decile"] = df_final["burden_decile"].astype("float") + 1.0
-df_final["expected_trials_per_100k"] = df_final.groupby("burden_decile")["trials_per_100k"].transform("mean")
-df_final["coverage_residual"] = df_final["trials_per_100k"] - df_final["expected_trials_per_100k"]
-
-resid_std = df_final["coverage_residual"].std(skipna=True)
-if resid_std and not np.isnan(resid_std) and resid_std > 0:
-    resid_mean = df_final["coverage_residual"].mean(skipna=True)
-    df_final["coverage_residual_z"] = (df_final["coverage_residual"] - resid_mean) / resid_std
+_ALIGN_CSVS = [
+    TEMP / "state_coverage_alignment.csv",
+    TEMP / "state_density_by_sponsor.csv",
+    TEMP / "state_density_by_status.csv",
+    TEMP / "state_density_by_phase.csv",
+]
+if csvs_cached(*_ALIGN_CSVS):
+    print("[CACHE] Loading state coverage alignment from CSV cache ...")
+    df_final = pd.read_csv(TEMP / "state_coverage_alignment.csv")
+    state_sponsor = pd.read_csv(TEMP / "state_density_by_sponsor.csv")
+    state_status = pd.read_csv(TEMP / "state_density_by_status.csv")
+    state_phase = pd.read_csv(TEMP / "state_density_by_phase.csv")
 else:
-    df_final["coverage_residual_z"] = np.nan
+    # Assemble one row per state with trial burden, density, and socioeconomic context.
+    df_final = (
+        pd.DataFrame({"stateabbr": sorted(US_STATE_ABBR)})
+        .merge(df_state_ct, on="stateabbr", how="left")
+        .merge(df_cdc_latest, on="stateabbr", how="left")
+        .merge(df_cdc_wide, on="stateabbr", how="left")
+        .merge(df_acs_features, on="stateabbr", how="left")
+        .merge(df_rural, on="stateabbr", how="left")
+        .merge(df_medicaid, on="stateabbr", how="left")
+    )
+    for col in ["trial_count", "site_count"]:
+        df_final[col] = df_final[col].fillna(0).astype(int)
 
-df_final["coverage_quartile"] = pd.qcut(
-    df_final["coverage_residual"],
-    q=4,
-    labels=["Q1_low", "Q2", "Q3", "Q4_high"],
-    duplicates="drop",
-)
+    df_final["trials_per_100k"] = safe_rate_per_100k(df_final["trial_count"], df_final["population"])
 
-# Persist outputs reused by later sections.
-df_final.to_csv(TEMP / "state_coverage_alignment.csv", index=False)
-state_sponsor.to_csv(TEMP / "state_density_by_sponsor.csv", index=False)
-state_status.to_csv(TEMP / "state_density_by_status.csv", index=False)
-state_phase.to_csv(TEMP / "state_density_by_phase.csv", index=False)
+    def build_state_density(df_pairs, group_col):
+        """Build state-level trial density table for one grouping variable."""
+        out = (
+            df_pairs.groupby(["stateabbr", group_col], as_index=False)["nct_id"]
+            .nunique()
+            .rename(columns={"nct_id": "trial_count"})
+        )
+        out = out.merge(df_acs_features[["stateabbr", "population"]], on="stateabbr", how="left")
+        out["trials_per_100k"] = safe_rate_per_100k(out["trial_count"], out["population"])
+        return out
+
+    # Stratified density tables reused later in EDA and modeling exports.
+    state_sponsor = build_state_density(df_trial_state, "sponsor_group")
+    state_status = build_state_density(df_trial_state, "status_group")
+    state_phase = build_state_density(df_trial_state, "phase_group")
+
+    # Pull sponsor-specific trial counts into the main state table.
+    sponsor_counts = (
+        state_sponsor.pivot_table(index="stateabbr", columns="sponsor_group", values="trial_count", aggfunc="first")
+        .rename(columns={"INDUSTRY": "industry_trial_count", "NON_INDUSTRY": "non_industry_trial_count"})
+        .reset_index()
+    )
+    for col in ["industry_trial_count", "non_industry_trial_count"]:
+        if col not in sponsor_counts.columns:
+            sponsor_counts[col] = 0
+
+    df_final = df_final.merge(
+        sponsor_counts[["stateabbr", "industry_trial_count", "non_industry_trial_count"]],
+        on="stateabbr",
+        how="left",
+    )
+    for col in ["industry_trial_count", "non_industry_trial_count"]:
+        df_final[col] = df_final[col].fillna(0).astype(int)
+
+    df_final["industry_trials_per_100k"] = safe_rate_per_100k(df_final["industry_trial_count"], df_final["population"])
+    df_final["non_industry_trials_per_100k"] = safe_rate_per_100k(df_final["non_industry_trial_count"], df_final["population"])
+    df_final["industry_pct"] = np.where(
+        df_final["trial_count"] > 0,
+        100.0 * df_final["industry_trial_count"] / df_final["trial_count"],
+        np.nan,
+    )
+
+    # Coverage residual = observed density - expected density within burden decile.
+    df_final["burden_decile"] = pd.qcut(df_final["diabetes_prevalence"], q=10, labels=False, duplicates="drop")
+    df_final["burden_decile"] = df_final["burden_decile"].astype("float") + 1.0
+    df_final["expected_trials_per_100k"] = df_final.groupby("burden_decile")["trials_per_100k"].transform("mean")
+    df_final["coverage_residual"] = df_final["trials_per_100k"] - df_final["expected_trials_per_100k"]
+
+    resid_std = df_final["coverage_residual"].std(skipna=True)
+    if resid_std and not np.isnan(resid_std) and resid_std > 0:
+        resid_mean = df_final["coverage_residual"].mean(skipna=True)
+        df_final["coverage_residual_z"] = (df_final["coverage_residual"] - resid_mean) / resid_std
+    else:
+        df_final["coverage_residual_z"] = np.nan
+
+    df_final["coverage_quartile"] = pd.qcut(
+        df_final["coverage_residual"],
+        q=4,
+        labels=["Q1_low", "Q2", "Q3", "Q4_high"],
+        duplicates="drop",
+    )
+
+    # Persist outputs reused by later sections.
+    df_final.to_csv(TEMP / "state_coverage_alignment.csv", index=False)
+    state_sponsor.to_csv(TEMP / "state_density_by_sponsor.csv", index=False)
+    state_status.to_csv(TEMP / "state_density_by_status.csv", index=False)
+    state_phase.to_csv(TEMP / "state_density_by_phase.csv", index=False)
+    print("Saved:", TEMP / "state_coverage_alignment.csv")
 
 print(f"df_final shape: {df_final.shape}")
 print("Columns:", df_final.columns.tolist())
-print("Saved:", TEMP / "state_coverage_alignment.csv")
 
 df_final[["stateabbr", "trials_per_100k", "coverage_residual", "poverty_rate", "median_income",
           "pct_black", "pct_hispanic", "pct_rural", "medicaid_expanded"]].sort_values("coverage_residual").head(10)
@@ -854,6 +903,15 @@ summary_paths = [
     RESULTS / "trial_category_by_coverage_quartile_bar.png",
     RESULTS / "ses_correlation_heatmap.png",
     RESULTS / "ses_pca_biplot.png",
+    # Product results (modeling figures)
+    PRODUCT_RESULTS / "predictor_correlation_heatmap.png",
+    PRODUCT_RESULTS / "elastic_net_coefficients.png",
+    PRODUCT_RESULTS / "elastic_net_actual_vs_predicted.png",
+    PRODUCT_RESULTS / "rf_permutation_importance.png",
+    PRODUCT_RESULTS / "model_comparison_cv.png",
+    PRODUCT_RESULTS / "shap_summary_plot.png",
+    PRODUCT_RESULTS / "shap_group_importance.png",
+    PRODUCT_RESULTS / "final_dataset_eda_overview.png",
 ]
 
 for p in summary_paths:
@@ -868,148 +926,156 @@ These cells assemble the state-level modeling table used downstream in the final
 ```{python}
 #| label: state-acs-full-feature-set
 #| output: false
-# 4-Ext-A: ACS 5-Year 2022 state-level feature set aligned to county schema.
-ACS_VARS_B = {
-    "B01003_001E": "pop_total",
-    "B17001_002E": "pop_poverty",
-    "B19013_001E": "median_hh_income",
-    "B19083_001E": "gini_index",
-    "B03002_003E": "pop_nhwhite",
-    "B03002_004E": "pop_nhblack",
-    "B03002_012E": "pop_hispanic",
-    "B25044_003E": "hh_no_vehicle_owned",
-    "B25044_001E": "hh_total",
-    "B28002_013E": "hh_no_internet",
-    "B23025_005E": "pop_unemployed",
-    "B23025_002E": "pop_labor_force",
-}
-ACS_VARS_S = {
-    "S2701_C05_001E": "pct_uninsured",
-    "S1501_C02_015E": "pct_bachelors_plus",
-}
-ACS_BASE = "https://api.census.gov/data/2022/acs/acs5"
-ACS_BASE_S = "https://api.census.gov/data/2022/acs/acs5/subject"
-
-
-def fetch_state_acs(var_map, base_url):
-    params = {
-        "get": ",".join(["NAME"] + list(var_map.keys())),
-        "for": "state:*",
+if csvs_cached(TEMP / "acs_state_2022_full.csv"):
+    print("[CACHE] Loading state ACS full feature set from CSV cache ...")
+    df_acs_state = pd.read_csv(TEMP / "acs_state_2022_full.csv")
+else:
+    # 4-Ext-A: ACS 5-Year 2022 state-level feature set aligned to county schema.
+    ACS_VARS_B = {
+        "B01003_001E": "pop_total",
+        "B17001_002E": "pop_poverty",
+        "B19013_001E": "median_hh_income",
+        "B19083_001E": "gini_index",
+        "B03002_003E": "pop_nhwhite",
+        "B03002_004E": "pop_nhblack",
+        "B03002_012E": "pop_hispanic",
+        "B25044_003E": "hh_no_vehicle_owned",
+        "B25044_001E": "hh_total",
+        "B28002_013E": "hh_no_internet",
+        "B23025_005E": "pop_unemployed",
+        "B23025_002E": "pop_labor_force",
     }
-    if CENSUS_KEY:
-        params["key"] = CENSUS_KEY
+    ACS_VARS_S = {
+        "S2701_C05_001E": "pct_uninsured",
+        "S1501_C02_015E": "pct_bachelors_plus",
+    }
+    ACS_BASE = "https://api.census.gov/data/2022/acs/acs5"
+    ACS_BASE_S = "https://api.census.gov/data/2022/acs/acs5/subject"
 
-    rows = request_json(base_url, params=params, timeout=60)
-    if not rows or len(rows) < 2:
-        raise ValueError("ACS state request returned an empty payload.")
+    def fetch_state_acs(var_map, base_url):
+        params = {
+            "get": ",".join(["NAME"] + list(var_map.keys())),
+            "for": "state:*",
+        }
+        if CENSUS_KEY:
+            params["key"] = CENSUS_KEY
 
-    df = pd.DataFrame(rows[1:], columns=rows[0]).rename(columns=var_map)
-    df["stateabbr"] = df["state"].map(FIPS_TO_ABBR)
+        rows = request_json(base_url, params=params, timeout=60)
+        if not rows or len(rows) < 2:
+            raise ValueError("ACS state request returned an empty payload.")
 
-    numeric_cols = list(var_map.values())
-    df[numeric_cols] = (
-        df[numeric_cols]
-        .apply(pd.to_numeric, errors="coerce")
-        .replace(-666666666, np.nan)
+        df = pd.DataFrame(rows[1:], columns=rows[0]).rename(columns=var_map)
+        df["stateabbr"] = df["state"].map(FIPS_TO_ABBR)
+
+        numeric_cols = list(var_map.values())
+        df[numeric_cols] = (
+            df[numeric_cols]
+            .apply(pd.to_numeric, errors="coerce")
+            .replace(-666666666, np.nan)
+        )
+        return df.dropna(subset=["stateabbr"])
+
+    print("Fetching state ACS B-tables ...")
+    df_acs_st_b = fetch_state_acs(ACS_VARS_B, ACS_BASE)
+    print(f"  B-table rows: {len(df_acs_st_b)}")
+
+    print("Fetching state ACS S-tables ...")
+    df_acs_st_s = fetch_state_acs(ACS_VARS_S, ACS_BASE_S)
+    print(f"  S-table rows: {len(df_acs_st_s)}")
+
+    df_acs_state = df_acs_st_b.merge(
+        df_acs_st_s[["stateabbr", "pct_uninsured", "pct_bachelors_plus"]],
+        on="stateabbr",
+        how="left",
     )
-    return df.dropna(subset=["stateabbr"])
 
+    df_acs_state["pct_poverty"] = safe_percent(df_acs_state["pop_poverty"], df_acs_state["pop_total"])
+    df_acs_state["pct_nhwhite"] = safe_percent(df_acs_state["pop_nhwhite"], df_acs_state["pop_total"])
+    df_acs_state["pct_nhblack"] = safe_percent(df_acs_state["pop_nhblack"], df_acs_state["pop_total"])
+    df_acs_state["pct_hispanic"] = safe_percent(df_acs_state["pop_hispanic"], df_acs_state["pop_total"])
+    df_acs_state["pct_no_vehicle"] = safe_percent(df_acs_state["hh_no_vehicle_owned"], df_acs_state["hh_total"])
+    df_acs_state["pct_no_internet"] = safe_percent(df_acs_state["hh_no_internet"], df_acs_state["hh_total"])
+    df_acs_state["pct_unemployed"] = safe_percent(df_acs_state["pop_unemployed"], df_acs_state["pop_labor_force"])
 
-print("Fetching state ACS B-tables ...")
-df_acs_st_b = fetch_state_acs(ACS_VARS_B, ACS_BASE)
-print(f"  B-table rows: {len(df_acs_st_b)}")
+    df_acs_state.to_csv(TEMP / "acs_state_2022_full.csv", index=False)
+    print(f"Saved: acs_state_2022_full.csv  ({len(df_acs_state)} rows x {len(df_acs_state.columns)} cols)")
 
-print("Fetching state ACS S-tables ...")
-df_acs_st_s = fetch_state_acs(ACS_VARS_S, ACS_BASE_S)
-print(f"  S-table rows: {len(df_acs_st_s)}")
-
-df_acs_state = df_acs_st_b.merge(
-    df_acs_st_s[["stateabbr", "pct_uninsured", "pct_bachelors_plus"]],
-    on="stateabbr",
-    how="left",
-)
-
-df_acs_state["pct_poverty"] = safe_percent(df_acs_state["pop_poverty"], df_acs_state["pop_total"])
-df_acs_state["pct_nhwhite"] = safe_percent(df_acs_state["pop_nhwhite"], df_acs_state["pop_total"])
-df_acs_state["pct_nhblack"] = safe_percent(df_acs_state["pop_nhblack"], df_acs_state["pop_total"])
-df_acs_state["pct_hispanic"] = safe_percent(df_acs_state["pop_hispanic"], df_acs_state["pop_total"])
-df_acs_state["pct_no_vehicle"] = safe_percent(df_acs_state["hh_no_vehicle_owned"], df_acs_state["hh_total"])
-df_acs_state["pct_no_internet"] = safe_percent(df_acs_state["hh_no_internet"], df_acs_state["hh_total"])
-df_acs_state["pct_unemployed"] = safe_percent(df_acs_state["pop_unemployed"], df_acs_state["pop_labor_force"])
-
-df_acs_state.to_csv(TEMP / "acs_state_2022_full.csv", index=False)
-print(f"Saved: acs_state_2022_full.csv  ({len(df_acs_state)} rows x {len(df_acs_state.columns)} cols)")
+print(f"State ACS full: {len(df_acs_state)} rows x {len(df_acs_state.columns)} cols")
 ```
 
 ```{python}
 #| label: state-cdc-places-wide-feature-set
 #| output: false
-# 4-Ext-B: CDC PLACES state features derived from county rows (2025 schema has no geographiclevel column).
-PLACES_URL = "https://data.cdc.gov/resource/swc5-untb.json"
-STATE_MEASURES = [
-    "DIABETES", "ACCESS2", "LACKTRPT", "FOODINSECU", "HOUSINSECU",
-    "FOODSTAMP", "GHLTH", "BPHIGH", "OBESITY", "MHLTH", "DEPRESSION", "LPA",
-    "KIDNEY", "STROKE", "CHD",
-]
-measure_str = ",".join(f"'{m}'" for m in STATE_MEASURES)
+if csvs_cached(TEMP / "cdc_places_state_wide.csv"):
+    print("[CACHE] Loading CDC PLACES state wide from CSV cache ...")
+    df_places_state = pd.read_csv(TEMP / "cdc_places_state_wide.csv")
+else:
+    # 4-Ext-B: CDC PLACES state features derived from county rows (2025 schema has no geographiclevel column).
+    PLACES_URL = "https://data.cdc.gov/resource/swc5-untb.json"
+    STATE_MEASURES = [
+        "DIABETES", "ACCESS2", "LACKTRPT", "FOODINSECU", "HOUSINSECU",
+        "FOODSTAMP", "GHLTH", "BPHIGH", "OBESITY", "MHLTH", "DEPRESSION", "LPA",
+        "KIDNEY", "STROKE", "CHD",
+    ]
+    measure_str = ",".join(f"'{m}'" for m in STATE_MEASURES)
 
-places_rows = fetch_socrata_rows(
-    PLACES_URL,
-    where_clause=f"measureid IN ({measure_str}) AND datavaluetypeid='AgeAdjPrv'",
-    order_by="stateabbr,locationid,measureid,year",
-    limit=10_000,
-    timeout=60,
-    sleep_sec=REQUEST_PAUSE_SEC,
-)
+    places_rows = fetch_socrata_rows(
+        PLACES_URL,
+        where_clause=f"measureid IN ({measure_str}) AND datavaluetypeid='AgeAdjPrv'",
+        order_by="stateabbr,locationid,measureid,year",
+        limit=10_000,
+        timeout=60,
+        sleep_sec=REQUEST_PAUSE_SEC,
+    )
+    save_json(RAW / "cdc_places_state_extended.json", places_rows)
 
-print(f"CDC PLACES rows pulled: {len(places_rows):,}")
-df_places = pd.DataFrame(places_rows)
+    print(f"CDC PLACES rows pulled: {len(places_rows):,}")
+    df_places = pd.DataFrame(places_rows)
 
-for col in ["year", "data_value", "totalpopulation", "totalpop18plus"]:
-    if col in df_places.columns:
-        df_places[col] = pd.to_numeric(df_places[col], errors="coerce")
+    for col in ["year", "data_value", "totalpopulation", "totalpop18plus"]:
+        if col in df_places.columns:
+            df_places[col] = pd.to_numeric(df_places[col], errors="coerce")
 
-df_places["stateabbr"] = df_places["stateabbr"].astype(str).str.upper()
-df_places = df_places[df_places["stateabbr"].isin(US_STATE_ABBR)].copy()
+    df_places["stateabbr"] = df_places["stateabbr"].astype(str).str.upper()
+    df_places = df_places[df_places["stateabbr"].isin(US_STATE_ABBR)].copy()
 
-# Keep latest year per county x measure, then aggregate county values to state-level weighted means.
-df_places_latest = (
-    df_places.sort_values(["stateabbr", "locationid", "measureid", "year"])
-    .drop_duplicates(subset=["stateabbr", "locationid", "measureid"], keep="last")
-)
-df_places_latest["weight"] = df_places_latest["totalpop18plus"].where(
-    df_places_latest["totalpop18plus"] > 0,
-    df_places_latest["totalpopulation"],
-)
+    # Keep latest year per county x measure, then aggregate county values to state-level weighted means.
+    df_places_latest = (
+        df_places.sort_values(["stateabbr", "locationid", "measureid", "year"])
+        .drop_duplicates(subset=["stateabbr", "locationid", "measureid"], keep="last")
+    )
+    df_places_latest["weight"] = df_places_latest["totalpop18plus"].where(
+        df_places_latest["totalpop18plus"] > 0,
+        df_places_latest["totalpopulation"],
+    )
 
+    def _weighted_mean(group):
+        vals = pd.to_numeric(group["data_value"], errors="coerce")
+        wts = pd.to_numeric(group["weight"], errors="coerce")
+        mask = vals.notna() & wts.notna() & (wts > 0)
+        if mask.any():
+            return np.average(vals[mask], weights=wts[mask])
+        return vals.mean(skipna=True)
 
-def _weighted_mean(group):
-    vals = pd.to_numeric(group["data_value"], errors="coerce")
-    wts = pd.to_numeric(group["weight"], errors="coerce")
-    mask = vals.notna() & wts.notna() & (wts > 0)
-    if mask.any():
-        return np.average(vals[mask], weights=wts[mask])
-    return vals.mean(skipna=True)
+    df_places_state_long = (
+        df_places_latest.groupby(["stateabbr", "measureid"])
+        .apply(lambda g: _weighted_mean(g))
+        .reset_index(name="data_value")
+    )
 
+    df_places_state = (
+        df_places_state_long.pivot(index="stateabbr", columns="measureid", values="data_value")
+        .reset_index()
+    )
+    df_places_state.columns.name = None
+    df_places_state.columns = [
+        "stateabbr" if c == "stateabbr" else f"places_{c.lower()}"
+        for c in df_places_state.columns
+    ]
 
-df_places_state_long = (
-    df_places_latest.groupby(["stateabbr", "measureid"])
-    .apply(lambda g: _weighted_mean(g))
-    .reset_index(name="data_value")
-)
+    df_places_state.to_csv(TEMP / "cdc_places_state_wide.csv", index=False)
+    print(f"Saved: cdc_places_state_wide.csv  ({len(df_places_state)} states x {len(df_places_state.columns)} cols)")
 
-df_places_state = (
-    df_places_state_long.pivot(index="stateabbr", columns="measureid", values="data_value")
-    .reset_index()
-)
-df_places_state.columns.name = None
-df_places_state.columns = [
-    "stateabbr" if c == "stateabbr" else f"places_{c.lower()}"
-    for c in df_places_state.columns
-]
-
-df_places_state.to_csv(TEMP / "cdc_places_state_wide.csv", index=False)
-print(f"Saved: cdc_places_state_wide.csv  ({len(df_places_state)} states x {len(df_places_state.columns)} cols)")
 print("Measures:", [c for c in df_places_state.columns if c != "stateabbr"])
 ```
 
@@ -1025,105 +1091,112 @@ print("Skipping state diabetes incidence pull by design.")
 ```{python}
 #| label: state-infrastructure-features
 #| output: false
+if csvs_cached(TEMP / "npi_state_infrastructure.csv"):
+    print("[CACHE] Loading NPI state infrastructure from CSV cache ...")
+    df_npi_state = pd.read_csv(TEMP / "npi_state_infrastructure.csv")
+else:
+    # ── 4-Ext-D  NPI Endo Density + AMC Count — State Level ─────────────────────
+    # Queries NPI Registry by state (no ZIP→FIPS crosswalk needed at state level).
+    # Reuses the same taxonomy / keyword patterns as county cells 5-G and 5-H.
 
-# ── 4-Ext-D  NPI Endo Density + AMC Count — State Level ─────────────────────
-# Queries NPI Registry by state (no ZIP→FIPS crosswalk needed at state level).
-# Reuses the same taxonomy / keyword patterns as county cells 5-G and 5-H.
+    NPI_URL       = "https://npiregistry.cms.hhs.gov/api/"
+    ENDO_TAXONOMY = "Endocrinology, Diabetes & Metabolism"
+    AMC_KEYWORDS  = ["university", "medical school", "medical college", "cancer center"]
+    NPI_LIMIT     = 200
+    MAX_SKIP      = 1200
+    SLEEP_SEC     = 0.25
 
-NPI_URL       = "https://npiregistry.cms.hhs.gov/api/"
-ENDO_TAXONOMY = "Endocrinology, Diabetes & Metabolism"
-AMC_KEYWORDS  = ["university", "medical school", "medical college", "cancer center"]
-NPI_LIMIT     = 200
-MAX_SKIP      = 1200
-SLEEP_SEC     = 0.25
+    CTSA_HUBS_FIPS = {
+        "01073","01089","04019","06037","06059","06073","06075","06085","06113",
+        "08031","09009","11001","12001","12057","12086","13121","15003",
+        "17019","17031","18097","19103","20091","21067","22033","22071",
+        "24031","24510","25017","25025","26161","27003","29189","31055",
+        "33015","34023","35001","36055","36061","37063","37067","37135",
+        "39035","39049","40109","41051","42003","42101","44007","45019",
+        "47037","48029","48113","49035","50007","51540","51760","53033","55025","55079",
+    }
+    # Map CTSA county FIPS → state FIPS (first 2 chars) → state abbr
+    STATE_FIPS_TO_ABBR = {
+        "01":"AL","02":"AK","04":"AZ","05":"AR","06":"CA","08":"CO","09":"CT",
+        "10":"DE","11":"DC","12":"FL","13":"GA","15":"HI","16":"ID","17":"IL",
+        "18":"IN","19":"IA","20":"KS","21":"KY","22":"LA","23":"ME","24":"MD",
+        "25":"MA","26":"MI","27":"MN","28":"MS","29":"MO","30":"MT","31":"NE",
+        "32":"NV","33":"NH","34":"NJ","35":"NM","36":"NY","37":"NC","38":"ND",
+        "39":"OH","40":"OK","41":"OR","42":"PA","44":"RI","45":"SC","46":"SD",
+        "47":"TN","48":"TX","49":"UT","50":"VT","51":"VA","53":"WA","54":"WV",
+        "55":"WI","56":"WY",
+    }
+    CTSA_STATES = {STATE_FIPS_TO_ABBR[f[:2]] for f in CTSA_HUBS_FIPS if f[:2] in STATE_FIPS_TO_ABBR}
 
-CTSA_HUBS_FIPS = {
-    "01073","01089","04019","06037","06059","06073","06075","06085","06113",
-    "08031","09009","11001","12001","12057","12086","13121","15003",
-    "17019","17031","18097","19103","20091","21067","22033","22071",
-    "24031","24510","25017","25025","26161","27003","29189","31055",
-    "33015","34023","35001","36055","36061","37063","37067","37135",
-    "39035","39049","40109","41051","42003","42101","44007","45019",
-    "47037","48029","48113","49035","50007","51540","51760","53033","55025","55079",
-}
-# Map CTSA county FIPS → state FIPS (first 2 chars) → state abbr
-STATE_FIPS_TO_ABBR = {
-    "01":"AL","02":"AK","04":"AZ","05":"AR","06":"CA","08":"CO","09":"CT",
-    "10":"DE","11":"DC","12":"FL","13":"GA","15":"HI","16":"ID","17":"IL",
-    "18":"IN","19":"IA","20":"KS","21":"KY","22":"LA","23":"ME","24":"MD",
-    "25":"MA","26":"MI","27":"MN","28":"MS","29":"MO","30":"MT","31":"NE",
-    "32":"NV","33":"NH","34":"NJ","35":"NM","36":"NY","37":"NC","38":"ND",
-    "39":"OH","40":"OK","41":"OR","42":"PA","44":"RI","45":"SC","46":"SD",
-    "47":"TN","48":"TX","49":"UT","50":"VT","51":"VA","53":"WA","54":"WV",
-    "55":"WI","56":"WY",
-}
-CTSA_STATES = {STATE_FIPS_TO_ABBR[f[:2]] for f in CTSA_HUBS_FIPS if f[:2] in STATE_FIPS_TO_ABBR}
-
-# ── Endocrinologists ─────────────────────────────────────────────────────────
-endo_by_state = {}
-for state in sorted(US_STATE_ABBR):
-    count, skip = 0, 0
-    while skip <= MAX_SKIP:
-        params = {
-            "version": "2.1", "enumeration_type": "NPI-1",
-            "taxonomy_description": ENDO_TAXONOMY,
-            "state": state, "limit": NPI_LIMIT, "skip": skip,
-        }
-        r = requests.get(NPI_URL, params=params, timeout=60)
-        r.raise_for_status()
-        results = r.json().get("results", [])
-        count += len(results)
-        if not results or len(results) < NPI_LIMIT:
-            break
-        skip += NPI_LIMIT
-        time.sleep(SLEEP_SEC)
-    endo_by_state[state] = count
-
-df_endo_state = pd.DataFrame([
-    {"stateabbr": s, "endo_count": c} for s, c in endo_by_state.items()
-])
-print(f"Endocrinologists fetched: {df_endo_state['endo_count'].sum():,} across {len(df_endo_state)} states")
-
-# ── AMC orgs ─────────────────────────────────────────────────────────────────
-amc_by_state = {}
-for state in sorted(US_STATE_ABBR):
-    npis = set()
-    for kw in AMC_KEYWORDS:
-        skip = 0
-        while skip <= 400:
+    # ── Endocrinologists ─────────────────────────────────────────────────────────
+    endo_by_state = {}
+    for state in sorted(US_STATE_ABBR):
+        count, skip = 0, 0
+        while skip <= MAX_SKIP:
             params = {
-                "version": "2.1", "enumeration_type": "NPI-2",
-                "organization_name": kw, "state": state, "limit": 200, "skip": skip,
+                "version": "2.1", "enumeration_type": "NPI-1",
+                "taxonomy_description": ENDO_TAXONOMY,
+                "state": state, "limit": NPI_LIMIT, "skip": skip,
             }
             r = requests.get(NPI_URL, params=params, timeout=60)
             r.raise_for_status()
             results = r.json().get("results", [])
-            npis.update(res.get("number") for res in results)
-            if not results or len(results) < 200:
+            count += len(results)
+            if not results or len(results) < NPI_LIMIT:
                 break
-            skip += 200
+            skip += NPI_LIMIT
             time.sleep(SLEEP_SEC)
-    amc_by_state[state] = len(npis)
+        endo_by_state[state] = count
+    save_json(RAW / "npi_endo_state_counts.json", endo_by_state)
 
-df_amc_state = pd.DataFrame([
-    {"stateabbr": s, "amc_count": c, "has_ctsa": int(s in CTSA_STATES)}
-    for s, c in amc_by_state.items()
-])
-print(f"AMC NPI-2 orgs: {df_amc_state['amc_count'].sum():,} across {len(df_amc_state)} states")
-print(f"States with CTSA hub: {df_amc_state['has_ctsa'].sum()}")
+    df_endo_state = pd.DataFrame([
+        {"stateabbr": s, "endo_count": c} for s, c in endo_by_state.items()
+    ])
+    print(f"Endocrinologists fetched: {df_endo_state['endo_count'].sum():,} across {len(df_endo_state)} states")
 
-# ── Merge with ACS for per-100k rate ─────────────────────────────────────────
-df_acs_st = pd.read_csv(TEMP / "acs_state_2022_full.csv")
-df_npi_state = (
-    df_endo_state
-    .merge(df_amc_state, on="stateabbr", how="outer")
-    .merge(df_acs_st[["stateabbr", "pop_total"]], on="stateabbr", how="left")
-)
-df_npi_state["endo_per_100k"] = (
-    df_npi_state["endo_count"] / (df_npi_state["pop_total"].replace(0, float("nan")) / 100_000)
-)
-df_npi_state.to_csv(TEMP / "npi_state_infrastructure.csv", index=False)
-print(f"Saved: npi_state_infrastructure.csv  ({len(df_npi_state)} states)")
+    # ── AMC orgs ─────────────────────────────────────────────────────────────────
+    amc_by_state = {}
+    for state in sorted(US_STATE_ABBR):
+        npis = set()
+        for kw in AMC_KEYWORDS:
+            skip = 0
+            while skip <= 400:
+                params = {
+                    "version": "2.1", "enumeration_type": "NPI-2",
+                    "organization_name": kw, "state": state, "limit": 200, "skip": skip,
+                }
+                r = requests.get(NPI_URL, params=params, timeout=60)
+                r.raise_for_status()
+                results = r.json().get("results", [])
+                npis.update(res.get("number") for res in results)
+                if not results or len(results) < 200:
+                    break
+                skip += 200
+                time.sleep(SLEEP_SEC)
+        amc_by_state[state] = len(npis)
+    save_json(RAW / "npi_amc_state_counts.json", amc_by_state)
+
+    df_amc_state = pd.DataFrame([
+        {"stateabbr": s, "amc_count": c, "has_ctsa": int(s in CTSA_STATES)}
+        for s, c in amc_by_state.items()
+    ])
+    print(f"AMC NPI-2 orgs: {df_amc_state['amc_count'].sum():,} across {len(df_amc_state)} states")
+    print(f"States with CTSA hub: {df_amc_state['has_ctsa'].sum()}")
+
+    # ── Merge with ACS for per-100k rate ─────────────────────────────────────────
+    df_acs_st = pd.read_csv(TEMP / "acs_state_2022_full.csv")
+    df_npi_state = (
+        df_endo_state
+        .merge(df_amc_state, on="stateabbr", how="outer")
+        .merge(df_acs_st[["stateabbr", "pop_total"]], on="stateabbr", how="left")
+    )
+    df_npi_state["endo_per_100k"] = (
+        df_npi_state["endo_count"] / (df_npi_state["pop_total"].replace(0, float("nan")) / 100_000)
+    )
+    df_npi_state.to_csv(TEMP / "npi_state_infrastructure.csv", index=False)
+    print(f"Saved: npi_state_infrastructure.csv  ({len(df_npi_state)} states)")
+
+print(f"NPI state infrastructure: {len(df_npi_state)} states")
 ```
 
 ```{python}
@@ -1203,137 +1276,144 @@ The analysis extends to counties to resolve site locations to county FIPS, estim
 ```{python}
 #| label: county-city-to-fips-resolution
 #| output: false
-# 5-A: City -> County FIPS mapping.
-# Source strategy:
-#   1) Census Gazetteer 2022 for place centroid coordinates
-#   2) FCC Census API reverse geocoder (lat/lon -> county FIPS)
-#
-# The old Census place-county relationship URL used in prior versions now returns 404.
+_FIPS_CSVS = [TEMP / "ct_sites_county.csv", RAW / "city_county_fips_lookup.csv"]
+if csvs_cached(*_FIPS_CSVS):
+    print("[CACHE] Loading city-to-FIPS resolution from CSV cache ...")
+else:
+    # 5-A: City -> County FIPS mapping.
+    # Source strategy:
+    #   1) Census Gazetteer 2022 for place centroid coordinates
+    #   2) FCC Census API reverse geocoder (lat/lon -> county FIPS)
+    #
+    # The old Census place-county relationship URL used in prior versions now returns 404.
 
-import io
-import time
-import zipfile
+    import io
+    import time
+    import zipfile
 
-GAZ_URL = (
-    "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2022_Gazetteer/"
-    "2022_Gaz_place_national.zip"
-)
-FCC_URL = "https://geo.fcc.gov/api/census/block/find"
+    GAZ_URL = (
+        "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2022_Gazetteer/"
+        "2022_Gaz_place_national.zip"
+    )
+    FCC_URL = "https://geo.fcc.gov/api/census/block/find"
 
+    def normalize_city(value):
+        city = (value or "").strip().lower()
+        for suffix in [" city", " town", " township", " village", " borough", " cdp"]:
+            city = city.removesuffix(suffix)
+        return city
 
-def normalize_city(value):
-    city = (value or "").strip().lower()
-    for suffix in [" city", " town", " township", " village", " borough", " cdp"]:
-        city = city.removesuffix(suffix)
-    return city
+    # Load trial sites first so we only resolve keys we actually need.
+    ct_sites_flat = pd.read_csv(TEMP / "ct_sites_flat.csv", dtype=str)
+    ct_sites_flat["city"] = ct_sites_flat["city"].fillna("").str.strip()
+    ct_sites_flat["state"] = ct_sites_flat["state"].fillna("").str.strip().str.upper()
+    ct_sites_flat["city_norm"] = ct_sites_flat["city"].apply(normalize_city)
+    ct_sites_flat["lookup_key"] = ct_sites_flat["city_norm"] + "|" + ct_sites_flat["state"]
+    needed_keys = set(ct_sites_flat["lookup_key"].dropna().unique())
+    print(f"Unique city|state keys to resolve: {len(needed_keys):,}")
 
+    _gaz_cache = RAW / "2022_Gaz_place_national.csv"
+    if _gaz_cache.exists():
+        print(f"[CACHE HIT] Loading Gazetteer from {_gaz_cache}")
+        df_gaz = pd.read_csv(_gaz_cache, dtype=str)
+    else:
+        print("Downloading Census 2022 Gazetteer of Places ...")
+        gaz_resp = requests.get(GAZ_URL, timeout=120)
+        gaz_resp.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(gaz_resp.content)) as zf:
+            txt_name = [n for n in zf.namelist() if n.endswith(".txt")][0]
+            with zf.open(txt_name) as fh:
+                df_gaz = pd.read_csv(fh, sep="\t", dtype=str, encoding="latin-1")
+        df_gaz.to_csv(_gaz_cache, index=False)
 
-# Load trial sites first so we only resolve keys we actually need.
-ct_sites_flat = pd.read_csv(TEMP / "ct_sites_flat.csv", dtype=str)
-ct_sites_flat["city"] = ct_sites_flat["city"].fillna("").str.strip()
-ct_sites_flat["state"] = ct_sites_flat["state"].fillna("").str.strip().str.upper()
-ct_sites_flat["city_norm"] = ct_sites_flat["city"].apply(normalize_city)
-ct_sites_flat["lookup_key"] = ct_sites_flat["city_norm"] + "|" + ct_sites_flat["state"]
-needed_keys = set(ct_sites_flat["lookup_key"].dropna().unique())
-print(f"Unique city|state keys to resolve: {len(needed_keys):,}")
+    df_gaz.columns = df_gaz.columns.str.strip()
+    df_gaz = df_gaz.rename(columns={
+        "USPS": "state_abbr",
+        "NAME": "place_name",
+        "GEOID": "place_geoid",
+        "INTPTLAT": "place_lat",
+        "INTPTLONG": "place_lon",
+    })
+    df_gaz = df_gaz[["state_abbr", "place_name", "place_geoid", "place_lat", "place_lon"]].copy()
+    df_gaz["state_abbr"] = df_gaz["state_abbr"].str.strip().str.upper()
+    df_gaz["place_name"] = df_gaz["place_name"].str.strip()
+    df_gaz["place_geoid"] = df_gaz["place_geoid"].str.strip().str.zfill(7)
+    df_gaz["place_lat"] = pd.to_numeric(df_gaz["place_lat"], errors="coerce")
+    df_gaz["place_lon"] = pd.to_numeric(df_gaz["place_lon"], errors="coerce")
+    df_gaz["city_norm"] = df_gaz["place_name"].apply(normalize_city)
+    df_gaz["lookup_key"] = df_gaz["city_norm"] + "|" + df_gaz["state_abbr"]
 
-print("Downloading Census 2022 Gazetteer of Places ...")
-gaz_resp = requests.get(GAZ_URL, timeout=120)
-gaz_resp.raise_for_status()
-with zipfile.ZipFile(io.BytesIO(gaz_resp.content)) as zf:
-    txt_name = [n for n in zf.namelist() if n.endswith(".txt")][0]
-    with zf.open(txt_name) as fh:
-        df_gaz = pd.read_csv(fh, sep="\t", dtype=str, encoding="latin-1")
+    # Keep one candidate place row per lookup key (deterministic first after sorting).
+    df_candidates = (
+        df_gaz[df_gaz["lookup_key"].isin(needed_keys)]
+        .sort_values(["lookup_key", "place_name", "place_geoid"])
+        .drop_duplicates(subset=["lookup_key"], keep="first")
+        .copy()
+    )
+    print(f"Candidate Gazetteer matches: {len(df_candidates):,}")
 
-df_gaz.columns = df_gaz.columns.str.strip()
-df_gaz = df_gaz.rename(columns={
-    "USPS": "state_abbr",
-    "NAME": "place_name",
-    "GEOID": "place_geoid",
-    "INTPTLAT": "place_lat",
-    "INTPTLONG": "place_lon",
-})
-df_gaz = df_gaz[["state_abbr", "place_name", "place_geoid", "place_lat", "place_lon"]].copy()
-df_gaz["state_abbr"] = df_gaz["state_abbr"].str.strip().str.upper()
-df_gaz["place_name"] = df_gaz["place_name"].str.strip()
-df_gaz["place_geoid"] = df_gaz["place_geoid"].str.strip().str.zfill(7)
-df_gaz["place_lat"] = pd.to_numeric(df_gaz["place_lat"], errors="coerce")
-df_gaz["place_lon"] = pd.to_numeric(df_gaz["place_lon"], errors="coerce")
-df_gaz["city_norm"] = df_gaz["place_name"].apply(normalize_city)
-df_gaz["lookup_key"] = df_gaz["city_norm"] + "|" + df_gaz["state_abbr"]
+    session = requests.Session()
 
-# Keep one candidate place row per lookup key (deterministic first after sorting).
-df_candidates = (
-    df_gaz[df_gaz["lookup_key"].isin(needed_keys)]
-    .sort_values(["lookup_key", "place_name", "place_geoid"])
-    .drop_duplicates(subset=["lookup_key"], keep="first")
-    .copy()
-)
-print(f"Candidate Gazetteer matches: {len(df_candidates):,}")
+    def fcc_county_fips(lat, lon, max_retries=3):
+        if pd.isna(lat) or pd.isna(lon):
+            return None
 
+        params = {
+            "latitude": float(lat),
+            "longitude": float(lon),
+            "format": "json",
+        }
 
-session = requests.Session()
+        for attempt in range(max_retries):
+            try:
+                resp = session.get(FCC_URL, params=params, timeout=30)
+                resp.raise_for_status()
+                payload = resp.json()
+                county = payload.get("County", {}) if isinstance(payload, dict) else {}
+                fips = county.get("FIPS")
+                return str(fips).zfill(5) if fips else None
+            except Exception:
+                if attempt == max_retries - 1:
+                    return None
+                time.sleep(0.5 * (attempt + 1))
 
+    print("Resolving county FIPS from place centroids via FCC API ...")
+    county_vals = []
+    for i, row in enumerate(df_candidates.itertuples(index=False), start=1):
+        county_vals.append(fcc_county_fips(row.place_lat, row.place_lon))
+        if i % 200 == 0 or i == len(df_candidates):
+            print(f"  resolved {i:,}/{len(df_candidates):,}")
+        time.sleep(0.02)
 
-def fcc_county_fips(lat, lon, max_retries=3):
-    if pd.isna(lat) or pd.isna(lon):
-        return None
+    df_candidates["county_fips"] = county_vals
+    _fcc_result = dict(zip(df_candidates["lookup_key"], df_candidates["county_fips"].where(df_candidates["county_fips"].notna(), None)))
+    save_json(RAW / "fcc_county_fips_resolved.json", _fcc_result)
 
-    params = {
-        "latitude": float(lat),
-        "longitude": float(lon),
-        "format": "json",
-    }
+    # Build lookup dictionary used for joining onto trial sites.
+    df_lookup = df_candidates[["lookup_key", "county_fips", "place_lat", "place_lon"]].copy()
+    df_lookup = df_lookup.dropna(subset=["county_fips"]).drop_duplicates(subset=["lookup_key"], keep="first")
+    LOOKUP = df_lookup.set_index("lookup_key")[["county_fips", "place_lat", "place_lon"]].to_dict("index")
+    print(f"Lookup table size: {len(LOOKUP):,} city|state keys")
 
-    for attempt in range(max_retries):
-        try:
-            resp = session.get(FCC_URL, params=params, timeout=30)
-            resp.raise_for_status()
-            payload = resp.json()
-            county = payload.get("County", {}) if isinstance(payload, dict) else {}
-            fips = county.get("FIPS")
-            return str(fips).zfill(5) if fips else None
-        except Exception:
-            if attempt == max_retries - 1:
-                return None
-            time.sleep(0.5 * (attempt + 1))
+    # Join county FIPS onto trial sites.
+    info = ct_sites_flat["lookup_key"].map(LOOKUP)
+    ct_sites_flat = ct_sites_flat.copy()
+    ct_sites_flat["county_fips"] = info.apply(lambda d: d.get("county_fips") if isinstance(d, dict) else None)
+    ct_sites_flat["county_lat"] = info.apply(lambda d: d.get("place_lat") if isinstance(d, dict) else None)
+    ct_sites_flat["county_lon"] = info.apply(lambda d: d.get("place_lon") if isinstance(d, dict) else None)
 
+    n_total = len(ct_sites_flat)
+    n_matched = ct_sites_flat["county_fips"].notna().sum()
+    print(f"Sites matched: {n_matched:,}/{n_total:,} ({100 * n_matched / max(n_total, 1):.1f}%)")
+    unmatched = ct_sites_flat[ct_sites_flat["county_fips"].isna()][["city", "state"]].drop_duplicates()
+    print(f"Unique unmatched city+state pairs: {len(unmatched):,}")
+    if len(unmatched) <= 20:
+        print(unmatched.to_string(index=False))
 
-print("Resolving county FIPS from place centroids via FCC API ...")
-county_vals = []
-for i, row in enumerate(df_candidates.itertuples(index=False), start=1):
-    county_vals.append(fcc_county_fips(row.place_lat, row.place_lon))
-    if i % 200 == 0 or i == len(df_candidates):
-        print(f"  resolved {i:,}/{len(df_candidates):,}")
-    time.sleep(0.02)
-
-df_candidates["county_fips"] = county_vals
-
-# Build lookup dictionary used for joining onto trial sites.
-df_lookup = df_candidates[["lookup_key", "county_fips", "place_lat", "place_lon"]].copy()
-df_lookup = df_lookup.dropna(subset=["county_fips"]).drop_duplicates(subset=["lookup_key"], keep="first")
-LOOKUP = df_lookup.set_index("lookup_key")[["county_fips", "place_lat", "place_lon"]].to_dict("index")
-print(f"Lookup table size: {len(LOOKUP):,} city|state keys")
-
-# Join county FIPS onto trial sites.
-info = ct_sites_flat["lookup_key"].map(LOOKUP)
-ct_sites_flat = ct_sites_flat.copy()
-ct_sites_flat["county_fips"] = info.apply(lambda d: d.get("county_fips") if isinstance(d, dict) else None)
-ct_sites_flat["county_lat"] = info.apply(lambda d: d.get("place_lat") if isinstance(d, dict) else None)
-ct_sites_flat["county_lon"] = info.apply(lambda d: d.get("place_lon") if isinstance(d, dict) else None)
-
-n_total = len(ct_sites_flat)
-n_matched = ct_sites_flat["county_fips"].notna().sum()
-print(f"Sites matched: {n_matched:,}/{n_total:,} ({100 * n_matched / max(n_total, 1):.1f}%)")
-unmatched = ct_sites_flat[ct_sites_flat["county_fips"].isna()][["city", "state"]].drop_duplicates()
-print(f"Unique unmatched city+state pairs: {len(unmatched):,}")
-if len(unmatched) <= 20:
-    print(unmatched.to_string(index=False))
-
-ct_sites_flat.drop(columns=["city_norm"], inplace=True)
-ct_sites_flat.to_csv(TEMP / "ct_sites_county.csv", index=False)
-df_lookup.to_csv(RAW / "city_county_fips_lookup.csv", index=False)
-print("Saved: ct_sites_county.csv, city_county_fips_lookup.csv")
+    ct_sites_flat.drop(columns=["city_norm"], inplace=True)
+    ct_sites_flat.to_csv(TEMP / "ct_sites_county.csv", index=False)
+    df_lookup.to_csv(RAW / "city_county_fips_lookup.csv", index=False)
+    print("Saved: ct_sites_county.csv, city_county_fips_lookup.csv")
 ```
 
 ```{python}
@@ -1362,203 +1442,223 @@ print("Saved: county_trial_aggregates.csv")
 ```{python}
 #| label: county-nearest-site-distance
 #| output: false
-# 5-C: Distance to nearest trial site (Haversine proxy).
-# Source: Census 2020 county population centroids (no key required).
-# Note: straight-line distance is a travel-time proxy; road network effects are not captured.
-
-import io
-import numpy as np
-from scipy.spatial import cKDTree
-
-CENPOP_URL = (
-    "https://www2.census.gov/geo/docs/reference/cenpop2020/county/"
-    "CenPop2020_Mean_CO.txt"
-)
-
-print("Downloading Census 2020 county population centroids ...")
-cp_resp = requests.get(CENPOP_URL, timeout=60)
-cp_resp.raise_for_status()
-
-# Use utf-8-sig to strip BOM from the first header token (prevents STATEFP KeyError).
-df_cen = pd.read_csv(io.BytesIO(cp_resp.content), dtype=str, encoding="utf-8-sig")
-df_cen.columns = (
-    df_cen.columns.astype(str)
-    .str.replace("﻿", "", regex=False)
-    .str.strip()
-    .str.upper()
-)
-
-required_cols = ["STATEFP", "COUNTYFP", "LATITUDE", "LONGITUDE", "POPULATION"]
-missing_cols = [c for c in required_cols if c not in df_cen.columns]
-if missing_cols:
-    raise KeyError(f"Missing expected centroid columns: {missing_cols}; available={list(df_cen.columns)}")
-
-df_cen["county_fips"] = df_cen["STATEFP"].str.zfill(2) + df_cen["COUNTYFP"].str.zfill(3)
-df_cen["lat"] = pd.to_numeric(df_cen["LATITUDE"], errors="coerce")
-df_cen["lon"] = pd.to_numeric(df_cen["LONGITUDE"], errors="coerce")
-df_cen["pop"] = pd.to_numeric(df_cen["POPULATION"], errors="coerce")
-df_cen = df_cen[["county_fips", "lat", "lon", "pop"]].dropna()
-print(f"County centroids loaded: {len(df_cen):,}")
-
-county_agg = pd.read_csv(TEMP / "county_trial_aggregates.csv", dtype=str)
-county_agg["county_fips"] = county_agg["county_fips"].str.zfill(5)
-has_site = set(county_agg["county_fips"].unique())
-df_cen["has_trial_site"] = df_cen["county_fips"].isin(has_site)
-
-df_with = df_cen[df_cen["has_trial_site"]].copy()
-df_without = df_cen[~df_cen["has_trial_site"]].copy()
-print(f"Counties WITH sites: {len(df_with):,} | WITHOUT: {len(df_without):,}")
-
-EARTH_RADIUS_KM = 6371.0
-if df_with.empty:
-    raise ValueError("No counties with trial sites found; cannot compute nearest-site distances.")
-
-if df_without.empty:
-    df_with["dist_nearest_trial_km"] = 0.0
-    df_dist = df_with[["county_fips", "lat", "lon", "pop", "has_trial_site", "dist_nearest_trial_km"]].copy()
+if csvs_cached(TEMP / "county_distance_to_trial.csv"):
+    print("[CACHE] Loading county distance to trial from CSV cache ...")
 else:
-    tree = cKDTree(np.radians(df_with[["lat", "lon"]].values))
-    dist_rad, _ = tree.query(np.radians(df_without[["lat", "lon"]].values), k=1)
-    df_without["dist_nearest_trial_km"] = dist_rad * EARTH_RADIUS_KM
-    df_with["dist_nearest_trial_km"] = 0.0
-    df_dist = pd.concat([df_with, df_without], ignore_index=True)[
-        ["county_fips", "lat", "lon", "pop", "has_trial_site", "dist_nearest_trial_km"]
-    ]
+    # 5-C: Distance to nearest trial site (Haversine proxy).
+    # Source: Census 2020 county population centroids (no key required).
+    # Note: straight-line distance is a travel-time proxy; road network effects are not captured.
 
-df_dist.to_csv(TEMP / "county_distance_to_trial.csv", index=False)
+    import io
+    import numpy as np
+    from scipy.spatial import cKDTree
 
-if not df_without.empty:
-    print(f"Median dist (no-site counties): {df_without['dist_nearest_trial_km'].median():.1f} km")
-    print(f"% counties > 100 km: {(df_without['dist_nearest_trial_km'] > 100).mean() * 100:.1f}%")
-    print(f"% counties > 200 km: {(df_without['dist_nearest_trial_km'] > 200).mean() * 100:.1f}%")
-print("Saved: county_distance_to_trial.csv")
+    CENPOP_URL = (
+        "https://www2.census.gov/geo/docs/reference/cenpop2020/county/"
+        "CenPop2020_Mean_CO.txt"
+    )
+
+    _cenpop_cache = RAW / "CenPop2020_Mean_CO.csv"
+    if _cenpop_cache.exists():
+        print(f"[CACHE HIT] Loading county centroids from {_cenpop_cache}")
+        df_cen = pd.read_csv(_cenpop_cache, dtype=str)
+    else:
+        print("Downloading Census 2020 county population centroids ...")
+        cp_resp = requests.get(CENPOP_URL, timeout=60)
+        cp_resp.raise_for_status()
+
+        # Use utf-8-sig to strip BOM from the first header token (prevents STATEFP KeyError).
+        df_cen = pd.read_csv(io.BytesIO(cp_resp.content), dtype=str, encoding="utf-8-sig")
+        df_cen.to_csv(_cenpop_cache, index=False)
+    df_cen.columns = (
+        df_cen.columns.astype(str)
+        .str.replace("﻿", "", regex=False)
+        .str.strip()
+        .str.upper()
+    )
+
+    required_cols = ["STATEFP", "COUNTYFP", "LATITUDE", "LONGITUDE", "POPULATION"]
+    missing_cols = [c for c in required_cols if c not in df_cen.columns]
+    if missing_cols:
+        raise KeyError(f"Missing expected centroid columns: {missing_cols}; available={list(df_cen.columns)}")
+
+    df_cen["county_fips"] = df_cen["STATEFP"].str.zfill(2) + df_cen["COUNTYFP"].str.zfill(3)
+    df_cen["lat"] = pd.to_numeric(df_cen["LATITUDE"], errors="coerce")
+    df_cen["lon"] = pd.to_numeric(df_cen["LONGITUDE"], errors="coerce")
+    df_cen["pop"] = pd.to_numeric(df_cen["POPULATION"], errors="coerce")
+    df_cen = df_cen[["county_fips", "lat", "lon", "pop"]].dropna()
+    print(f"County centroids loaded: {len(df_cen):,}")
+
+    county_agg = pd.read_csv(TEMP / "county_trial_aggregates.csv", dtype=str)
+    county_agg["county_fips"] = county_agg["county_fips"].str.zfill(5)
+    has_site = set(county_agg["county_fips"].unique())
+    df_cen["has_trial_site"] = df_cen["county_fips"].isin(has_site)
+
+    df_with = df_cen[df_cen["has_trial_site"]].copy()
+    df_without = df_cen[~df_cen["has_trial_site"]].copy()
+    print(f"Counties WITH sites: {len(df_with):,} | WITHOUT: {len(df_without):,}")
+
+    EARTH_RADIUS_KM = 6371.0
+    if df_with.empty:
+        raise ValueError("No counties with trial sites found; cannot compute nearest-site distances.")
+
+    if df_without.empty:
+        df_with["dist_nearest_trial_km"] = 0.0
+        df_dist = df_with[["county_fips", "lat", "lon", "pop", "has_trial_site", "dist_nearest_trial_km"]].copy()
+    else:
+        tree = cKDTree(np.radians(df_with[["lat", "lon"]].values))
+        dist_rad, _ = tree.query(np.radians(df_without[["lat", "lon"]].values), k=1)
+        df_without["dist_nearest_trial_km"] = dist_rad * EARTH_RADIUS_KM
+        df_with["dist_nearest_trial_km"] = 0.0
+        df_dist = pd.concat([df_with, df_without], ignore_index=True)[
+            ["county_fips", "lat", "lon", "pop", "has_trial_site", "dist_nearest_trial_km"]
+        ]
+
+    df_dist.to_csv(TEMP / "county_distance_to_trial.csv", index=False)
+
+    if not df_without.empty:
+        print(f"Median dist (no-site counties): {df_without['dist_nearest_trial_km'].median():.1f} km")
+        print(f"% counties > 100 km: {(df_without['dist_nearest_trial_km'] > 100).mean() * 100:.1f}%")
+        print(f"% counties > 200 km: {(df_without['dist_nearest_trial_km'] > 200).mean() * 100:.1f}%")
+    print("Saved: county_distance_to_trial.csv")
 ```
 
 ```{python}
 #| label: county-acs-features
 #| output: false
-# 5-D: ACS 5-Year 2022 county-level feature set (same definitions as state-level cell 4-Ext-A).
-ACS_VARS_B = {
-    "B01003_001E": "pop_total",
-    "B17001_002E": "pop_poverty",
-    "B19013_001E": "median_hh_income",
-    "B19083_001E": "gini_index",
-    "B03002_003E": "pop_nhwhite",
-    "B03002_004E": "pop_nhblack",
-    "B03002_012E": "pop_hispanic",
-    "B25044_003E": "hh_no_vehicle_owned",
-    "B25044_001E": "hh_total",
-    "B28002_013E": "hh_no_internet",
-    "B23025_005E": "pop_unemployed",
-    "B23025_002E": "pop_labor_force",
-}
-ACS_VARS_S = {
-    "S2701_C05_001E": "pct_uninsured",
-    "S1501_C02_015E": "pct_bachelors_plus",
-}
-ACS_BASE = "https://api.census.gov/data/2022/acs/acs5"
-ACS_BASE_S = "https://api.census.gov/data/2022/acs/acs5/subject"
-
-
-def fetch_county_acs(var_map, base_url):
-    params = {
-        "get": ",".join(["NAME"] + list(var_map.keys())),
-        "for": "county:*",
-        "in": "state:*",
+if csvs_cached(TEMP / "acs_county_2022_features.csv"):
+    print("[CACHE] Loading county ACS features from CSV cache ...")
+    df_acs_county = pd.read_csv(TEMP / "acs_county_2022_features.csv")
+else:
+    # 5-D: ACS 5-Year 2022 county-level feature set (same definitions as state-level cell 4-Ext-A).
+    ACS_VARS_B = {
+        "B01003_001E": "pop_total",
+        "B17001_002E": "pop_poverty",
+        "B19013_001E": "median_hh_income",
+        "B19083_001E": "gini_index",
+        "B03002_003E": "pop_nhwhite",
+        "B03002_004E": "pop_nhblack",
+        "B03002_012E": "pop_hispanic",
+        "B25044_003E": "hh_no_vehicle_owned",
+        "B25044_001E": "hh_total",
+        "B28002_013E": "hh_no_internet",
+        "B23025_005E": "pop_unemployed",
+        "B23025_002E": "pop_labor_force",
     }
-    if CENSUS_KEY:
-        params["key"] = CENSUS_KEY
+    ACS_VARS_S = {
+        "S2701_C05_001E": "pct_uninsured",
+        "S1501_C02_015E": "pct_bachelors_plus",
+    }
+    ACS_BASE = "https://api.census.gov/data/2022/acs/acs5"
+    ACS_BASE_S = "https://api.census.gov/data/2022/acs/acs5/subject"
 
-    rows = request_json(base_url, params=params, timeout=120)
-    if not rows or len(rows) < 2:
-        raise ValueError("ACS county request returned an empty payload.")
+    def fetch_county_acs(var_map, base_url):
+        params = {
+            "get": ",".join(["NAME"] + list(var_map.keys())),
+            "for": "county:*",
+            "in": "state:*",
+        }
+        if CENSUS_KEY:
+            params["key"] = CENSUS_KEY
 
-    df = pd.DataFrame(rows[1:], columns=rows[0]).rename(columns=var_map)
-    df["county_fips"] = df["state"].str.zfill(2) + df["county"].str.zfill(3)
+        rows = request_json(base_url, params=params, timeout=120)
+        if not rows or len(rows) < 2:
+            raise ValueError("ACS county request returned an empty payload.")
 
-    numeric_cols = list(var_map.values())
-    df[numeric_cols] = (
-        df[numeric_cols]
-        .apply(pd.to_numeric, errors="coerce")
-        .replace(-666666666, np.nan)
+        df = pd.DataFrame(rows[1:], columns=rows[0]).rename(columns=var_map)
+        df["county_fips"] = df["state"].str.zfill(2) + df["county"].str.zfill(3)
+
+        numeric_cols = list(var_map.values())
+        df[numeric_cols] = (
+            df[numeric_cols]
+            .apply(pd.to_numeric, errors="coerce")
+            .replace(-666666666, np.nan)
+        )
+        return df
+
+    print("Fetching ACS B-tables for counties ...")
+    df_acs_b = fetch_county_acs(ACS_VARS_B, ACS_BASE)
+    print(f"  B-table rows: {len(df_acs_b):,}")
+
+    print("Fetching ACS S-tables for counties ...")
+    df_acs_s = fetch_county_acs(ACS_VARS_S, ACS_BASE_S)
+    print(f"  S-table rows: {len(df_acs_s):,}")
+
+    df_acs_county = df_acs_b.merge(
+        df_acs_s[["county_fips", "pct_uninsured", "pct_bachelors_plus"]],
+        on="county_fips",
+        how="left",
     )
-    return df
 
+    df_acs_county["pct_poverty"] = safe_percent(df_acs_county["pop_poverty"], df_acs_county["pop_total"])
+    df_acs_county["pct_nhwhite"] = safe_percent(df_acs_county["pop_nhwhite"], df_acs_county["pop_total"])
+    df_acs_county["pct_nhblack"] = safe_percent(df_acs_county["pop_nhblack"], df_acs_county["pop_total"])
+    df_acs_county["pct_hispanic"] = safe_percent(df_acs_county["pop_hispanic"], df_acs_county["pop_total"])
+    df_acs_county["pct_no_vehicle"] = safe_percent(df_acs_county["hh_no_vehicle_owned"], df_acs_county["hh_total"])
+    df_acs_county["pct_no_internet"] = safe_percent(df_acs_county["hh_no_internet"], df_acs_county["hh_total"])
+    df_acs_county["pct_unemployed"] = safe_percent(df_acs_county["pop_unemployed"], df_acs_county["pop_labor_force"])
 
-print("Fetching ACS B-tables for counties ...")
-df_acs_b = fetch_county_acs(ACS_VARS_B, ACS_BASE)
-print(f"  B-table rows: {len(df_acs_b):,}")
+    df_acs_county.to_csv(TEMP / "acs_county_2022_features.csv", index=False)
+    print(f"Saved: acs_county_2022_features.csv  ({len(df_acs_county):,} rows)")
 
-print("Fetching ACS S-tables for counties ...")
-df_acs_s = fetch_county_acs(ACS_VARS_S, ACS_BASE_S)
-print(f"  S-table rows: {len(df_acs_s):,}")
-
-df_acs_county = df_acs_b.merge(
-    df_acs_s[["county_fips", "pct_uninsured", "pct_bachelors_plus"]],
-    on="county_fips",
-    how="left",
-)
-
-df_acs_county["pct_poverty"] = safe_percent(df_acs_county["pop_poverty"], df_acs_county["pop_total"])
-df_acs_county["pct_nhwhite"] = safe_percent(df_acs_county["pop_nhwhite"], df_acs_county["pop_total"])
-df_acs_county["pct_nhblack"] = safe_percent(df_acs_county["pop_nhblack"], df_acs_county["pop_total"])
-df_acs_county["pct_hispanic"] = safe_percent(df_acs_county["pop_hispanic"], df_acs_county["pop_total"])
-df_acs_county["pct_no_vehicle"] = safe_percent(df_acs_county["hh_no_vehicle_owned"], df_acs_county["hh_total"])
-df_acs_county["pct_no_internet"] = safe_percent(df_acs_county["hh_no_internet"], df_acs_county["hh_total"])
-df_acs_county["pct_unemployed"] = safe_percent(df_acs_county["pop_unemployed"], df_acs_county["pop_labor_force"])
-
-df_acs_county.to_csv(TEMP / "acs_county_2022_features.csv", index=False)
-print(f"Saved: acs_county_2022_features.csv  ({len(df_acs_county):,} rows)")
+print(f"County ACS features: {len(df_acs_county):,} rows")
 ```
 
 ```{python}
 #| label: county-cdc-places-features
 #| output: false
-# 5-E: CDC PLACES county-level features (current schema does not expose geographiclevel column).
-PLACES_URL = "https://data.cdc.gov/resource/swc5-untb.json"
-COUNTY_MEASURES = [
-    "DIABETES", "ACCESS2", "LACKTRPT", "FOODINSECU", "HOUSINSECU",
-    "FOODSTAMP", "GHLTH", "BPHIGH", "OBESITY", "MHLTH", "DEPRESSION", "LPA",
-    "KIDNEY", "STROKE", "CHD",
-]
-measure_str = ",".join(f"'{m}'" for m in COUNTY_MEASURES)
+if csvs_cached(TEMP / "cdc_places_county_wide.csv"):
+    print("[CACHE] Loading CDC PLACES county features from CSV cache ...")
+    df_places_county = pd.read_csv(TEMP / "cdc_places_county_wide.csv")
+else:
+    # 5-E: CDC PLACES county-level features (current schema does not expose geographiclevel column).
+    PLACES_URL = "https://data.cdc.gov/resource/swc5-untb.json"
+    COUNTY_MEASURES = [
+        "DIABETES", "ACCESS2", "LACKTRPT", "FOODINSECU", "HOUSINSECU",
+        "FOODSTAMP", "GHLTH", "BPHIGH", "OBESITY", "MHLTH", "DEPRESSION", "LPA",
+        "KIDNEY", "STROKE", "CHD",
+    ]
+    measure_str = ",".join(f"'{m}'" for m in COUNTY_MEASURES)
 
-places_rows = fetch_socrata_rows(
-    PLACES_URL,
-    where_clause=f"measureid IN ({measure_str}) AND datavaluetypeid='AgeAdjPrv'",
-    order_by="stateabbr,locationid,measureid,year",
-    limit=10_000,
-    timeout=120,
-    sleep_sec=REQUEST_PAUSE_SEC,
-)
-print(f"Total CDC PLACES county rows: {len(places_rows):,}")
+    places_rows = fetch_socrata_rows(
+        PLACES_URL,
+        where_clause=f"measureid IN ({measure_str}) AND datavaluetypeid='AgeAdjPrv'",
+        order_by="stateabbr,locationid,measureid,year",
+        limit=10_000,
+        timeout=120,
+        sleep_sec=REQUEST_PAUSE_SEC,
+    )
+    save_json(RAW / "cdc_places_county_extended.json", places_rows)
+    print(f"Total CDC PLACES county rows: {len(places_rows):,}")
 
-df_places_long = pd.DataFrame(places_rows)
-df_places_long["data_value"] = pd.to_numeric(df_places_long.get("data_value"), errors="coerce")
-df_places_long["year"] = pd.to_numeric(df_places_long.get("year"), errors="coerce")
-df_places_long["locationid"] = df_places_long["locationid"].astype(str).str.zfill(5)
+    df_places_long = pd.DataFrame(places_rows)
+    df_places_long["data_value"] = pd.to_numeric(df_places_long.get("data_value"), errors="coerce")
+    df_places_long["year"] = pd.to_numeric(df_places_long.get("year"), errors="coerce")
+    df_places_long["locationid"] = df_places_long["locationid"].astype(str).str.zfill(5)
 
-# Keep latest year per county x measure.
-df_places_long = (
-    df_places_long.sort_values(["locationid", "measureid", "year"])
-    .drop_duplicates(subset=["locationid", "measureid"], keep="last")
-)
+    # Keep latest year per county x measure.
+    df_places_long = (
+        df_places_long.sort_values(["locationid", "measureid", "year"])
+        .drop_duplicates(subset=["locationid", "measureid"], keep="last")
+    )
 
-df_places_county = (
-    df_places_long[["locationid", "measureid", "data_value"]]
-    .drop_duplicates(subset=["locationid", "measureid"])
-    .pivot(index="locationid", columns="measureid", values="data_value")
-    .reset_index()
-    .rename(columns={"locationid": "county_fips"})
-)
-df_places_county.columns.name = None
-df_places_county.columns = [
-    "county_fips" if c == "county_fips" else f"places_{c.lower()}"
-    for c in df_places_county.columns
-]
+    df_places_county = (
+        df_places_long[["locationid", "measureid", "data_value"]]
+        .drop_duplicates(subset=["locationid", "measureid"])
+        .pivot(index="locationid", columns="measureid", values="data_value")
+        .reset_index()
+        .rename(columns={"locationid": "county_fips"})
+    )
+    df_places_county.columns.name = None
+    df_places_county.columns = [
+        "county_fips" if c == "county_fips" else f"places_{c.lower()}"
+        for c in df_places_county.columns
+    ]
 
-df_places_county.to_csv(TEMP / "cdc_places_county_wide.csv", index=False)
-print(f"Saved: cdc_places_county_wide.csv  ({len(df_places_county):,} counties x {len(df_places_county.columns)} cols)")
+    df_places_county.to_csv(TEMP / "cdc_places_county_wide.csv", index=False)
+    print(f"Saved: cdc_places_county_wide.csv  ({len(df_places_county):,} counties x {len(df_places_county.columns)} cols)")
+
+print(f"CDC PLACES county wide: {len(df_places_county):,} counties x {len(df_places_county.columns)} cols")
 ```
 
 ```{python}
@@ -1575,125 +1675,60 @@ print("Skipping county diabetes incidence pull by design.")
 #| output: false
 
 # ── 5-G  Endocrinologist Density — NPI Registry ─────────────────────────────
-# Taxonomy: Endocrinology, Diabetes & Metabolism (207RE0101X)
-# Pagination: skip/limit=200, max_skip=1200 per state
-# ZIP2COUNTY dict built here; reused by Cell 5-H
+# ZIP2COUNTY dict always built (needed by 5-H even on cache hit for endo CSV alone).
+# If BOTH 5-G and 5-H output CSVs are cached, skip entirely.
+_ENDO_BOTH_CSVS = [TEMP / "npi_endocrinologist_county.csv", TEMP / "amc_presence_county.csv"]
+if csvs_cached(*_ENDO_BOTH_CSVS):
+    print("[CACHE] Both endocrinologist and AMC county CSVs cached; skipping 5-G entirely.")
+else:
+    import io
 
-import io
+    NPI_URL       = "https://npiregistry.cms.hhs.gov/api/"
+    ENDO_TAXONOMY = "Endocrinology, Diabetes & Metabolism"
+    NPI_LIMIT     = 200
+    MAX_SKIP      = 1200
+    SLEEP_SEC     = 0.25
 
-NPI_URL       = "https://npiregistry.cms.hhs.gov/api/"
-ENDO_TAXONOMY = "Endocrinology, Diabetes & Metabolism"
-NPI_LIMIT     = 200
-MAX_SKIP      = 1200
-SLEEP_SEC     = 0.25
+    # ── ZCTA5 → county FIPS crosswalk ───────────────────────────────────────────
+    ZCTA_URL = (
+        "https://www2.census.gov/geo/docs/maps-data/data/rel2020/zcta520/"
+        "tab20_zcta520_county20_natl.txt"
+    )
+    _zcta_cache = RAW / "zcta5_county_crosswalk.csv"
+    if _zcta_cache.exists():
+        print(f"[CACHE HIT] Loading ZCTA crosswalk from {_zcta_cache}")
+        df_zcta = pd.read_csv(_zcta_cache, dtype=str)
+    else:
+        print("Downloading ZCTA5-to-county crosswalk ...")
+        zc_resp = requests.get(ZCTA_URL, timeout=120)
+        zc_resp.raise_for_status()
+        df_zcta = pd.read_csv(io.StringIO(zc_resp.content.decode("latin-1")), sep="|", dtype=str)
+        df_zcta.to_csv(_zcta_cache, index=False)
+    df_zcta.columns = df_zcta.columns.str.strip()
+    df_zcta = df_zcta.rename(columns={"GEOID_ZCTA5_20": "zip5", "GEOID_COUNTY_20": "county_fips_full"})
+    df_zcta["zip5"]        = df_zcta["zip5"].str.strip().str.zfill(5)
+    df_zcta["county_fips"] = df_zcta["county_fips_full"].str.strip().str[:5]
+    al_col = next((c for c in df_zcta.columns if "AREALAND" in c.upper()), None)
+    df_zcta["arealand"] = pd.to_numeric(df_zcta[al_col], errors="coerce").fillna(0) if al_col else 0
+    df_zcta_primary = (
+        df_zcta.sort_values("arealand", ascending=False)
+        .drop_duplicates(subset=["zip5"], keep="first")
+        [["zip5", "county_fips"]]
+    )
+    ZIP2COUNTY = df_zcta_primary.set_index("zip5")["county_fips"].to_dict()
+    print(f"  ZCTA5 crosswalk: {len(ZIP2COUNTY):,} ZIPs mapped")
 
-# ── ZCTA5 → county FIPS crosswalk ───────────────────────────────────────────
-ZCTA_URL = (
-    "https://www2.census.gov/geo/docs/maps-data/data/rel2020/zcta520/"
-    "tab20_zcta520_county20_natl.txt"
-)
-print("Downloading ZCTA5-to-county crosswalk ...")
-zc_resp = requests.get(ZCTA_URL, timeout=120)
-zc_resp.raise_for_status()
-df_zcta = pd.read_csv(io.StringIO(zc_resp.content.decode("latin-1")), sep="|", dtype=str)
-df_zcta.columns = df_zcta.columns.str.strip()
-df_zcta = df_zcta.rename(columns={"GEOID_ZCTA5_20": "zip5", "GEOID_COUNTY_20": "county_fips_full"})
-df_zcta["zip5"]        = df_zcta["zip5"].str.strip().str.zfill(5)
-df_zcta["county_fips"] = df_zcta["county_fips_full"].str.strip().str[:5]
-al_col = next((c for c in df_zcta.columns if "AREALAND" in c.upper()), None)
-df_zcta["arealand"] = pd.to_numeric(df_zcta[al_col], errors="coerce").fillna(0) if al_col else 0
-df_zcta_primary = (
-    df_zcta.sort_values("arealand", ascending=False)
-    .drop_duplicates(subset=["zip5"], keep="first")
-    [["zip5", "county_fips"]]
-)
-ZIP2COUNTY = df_zcta_primary.set_index("zip5")["county_fips"].to_dict()
-print(f"  ZCTA5 crosswalk: {len(ZIP2COUNTY):,} ZIPs mapped")
-
-# ── Fetch NPI endocrinologists ───────────────────────────────────────────────
-endo_records = []
-for state in sorted(US_STATE_ABBR):
-    skip = 0
-    while skip <= MAX_SKIP:
-        params = {
-            "version": "2.1",
-            "enumeration_type": "NPI-1",
-            "taxonomy_description": ENDO_TAXONOMY,
-            "state": state,
-            "limit": NPI_LIMIT,
-            "skip": skip,
-        }
-        r = requests.get(NPI_URL, params=params, timeout=60)
-        r.raise_for_status()
-        results = r.json().get("results", [])
-        if not results:
-            break
-        endo_records.extend(results)
-        if len(results) < NPI_LIMIT:
-            break
-        skip += NPI_LIMIT
-        time.sleep(SLEEP_SEC)
-print(f"Total endocrinologist NPI records: {len(endo_records):,}")
-
-def _get_zip(rec):
-    addrs = rec.get("addresses", [])
-    for a in addrs:
-        if a.get("address_purpose") == "LOCATION":
-            return str(a.get("postal_code", ""))[:5]
-    return str(addrs[0].get("postal_code", ""))[:5] if addrs else None
-
-df_endo = pd.DataFrame({
-    "npi":  [r.get("number") for r in endo_records],
-    "zip5": [_get_zip(r) for r in endo_records],
-})
-df_endo["county_fips"] = df_endo["zip5"].map(ZIP2COUNTY)
-df_endo_county = (
-    df_endo.dropna(subset=["county_fips"])
-    .groupby("county_fips")
-    .size()
-    .reset_index(name="endo_count")
-)
-print(f"  Counties with >=1 endocrinologist: {len(df_endo_county):,}")
-df_endo_county.to_csv(TEMP / "npi_endocrinologist_county.csv", index=False)
-print("Saved: npi_endocrinologist_county.csv")
-```
-
-```{python}
-#| label: county-amc-presence
-#| output: false
-
-# ── 5-H  Academic Medical Center (AMC) Presence ─────────────────────────────
-# Source 1: NPI-2 org search (keywords: university, medical school, etc.)
-# Source 2: Hardcoded CTSA hub county FIPS (NIH NCATS list)
-# Requires ZIP2COUNTY dict from Cell 5-G
-
-NPI_URL      = "https://npiregistry.cms.hhs.gov/api/"
-AMC_KEYWORDS = ["university", "medical school", "medical college", "cancer center"]
-AMC_SLEEP    = 0.25
-
-# CTSA hub county FIPS (hardcoded — one-off lookup from NIH NCATS hub list)
-CTSA_HUBS_FIPS = {
-    "01073", "01089", "04019", "06037", "06059", "06073", "06075", "06085", "06113",
-    "08031", "09009", "11001", "12001", "12057", "12086", "13121", "15003",
-    "17019", "17031", "18097", "19103", "20091", "21067", "22033", "22071",
-    "24031", "24510", "25017", "25025", "26161", "27003", "29189", "31055",
-    "33015", "34023", "35001", "36055", "36061", "37063", "37067", "37135",
-    "39035", "39049", "40109", "41051", "42003", "42101", "44007", "45019",
-    "47037", "48029", "48113", "49035", "50007", "51540", "51760", "53033", "55025", "55079",
-}
-
-# ── NPI-2 org search ─────────────────────────────────────────────────────────
-amc_records = []
-for state in sorted(US_STATE_ABBR):
-    for kw in AMC_KEYWORDS:
+    # ── Fetch NPI endocrinologists ───────────────────────────────────────────────
+    endo_records = []
+    for state in sorted(US_STATE_ABBR):
         skip = 0
-        while skip <= 400:
+        while skip <= MAX_SKIP:
             params = {
                 "version": "2.1",
-                "enumeration_type": "NPI-2",
-                "organization_name": kw,
+                "enumeration_type": "NPI-1",
+                "taxonomy_description": ENDO_TAXONOMY,
                 "state": state,
-                "limit": 200,
+                "limit": NPI_LIMIT,
                 "skip": skip,
             }
             r = requests.get(NPI_URL, params=params, timeout=60)
@@ -1701,107 +1736,186 @@ for state in sorted(US_STATE_ABBR):
             results = r.json().get("results", [])
             if not results:
                 break
-            amc_records.extend(results)
-            if len(results) < 200:
+            endo_records.extend(results)
+            if len(results) < NPI_LIMIT:
                 break
-            skip += 200
-            time.sleep(AMC_SLEEP)
-print(f"AMC NPI-2 records fetched: {len(amc_records):,}")
+            skip += NPI_LIMIT
+            time.sleep(SLEEP_SEC)
+    save_json(RAW / "npi_endo_county_records.json", endo_records)
+    print(f"Total endocrinologist NPI records: {len(endo_records):,}")
 
-def _extract_zip(rec):
-    addrs = rec.get("addresses", [])
-    for a in addrs:
-        if a.get("address_purpose") == "LOCATION":
-            return str(a.get("postal_code", ""))[:5]
-    return str(addrs[0].get("postal_code", ""))[:5] if addrs else None
+    def _get_zip(rec):
+        addrs = rec.get("addresses", [])
+        for a in addrs:
+            if a.get("address_purpose") == "LOCATION":
+                return str(a.get("postal_code", ""))[:5]
+        return str(addrs[0].get("postal_code", ""))[:5] if addrs else None
 
-df_amc_raw = pd.DataFrame({
-    "npi":      [r.get("number") for r in amc_records],
-    "org_name": [r.get("basic", {}).get("organization_name", "") for r in amc_records],
-    "zip5":     [_extract_zip(r) for r in amc_records],
-}).drop_duplicates(subset=["npi"])
-df_amc_raw["county_fips"] = df_amc_raw["zip5"].map(ZIP2COUNTY)
+    df_endo = pd.DataFrame({
+        "npi":  [r.get("number") for r in endo_records],
+        "zip5": [_get_zip(r) for r in endo_records],
+    })
+    df_endo["county_fips"] = df_endo["zip5"].map(ZIP2COUNTY)
+    df_endo_county = (
+        df_endo.dropna(subset=["county_fips"])
+        .groupby("county_fips")
+        .size()
+        .reset_index(name="endo_count")
+    )
+    print(f"  Counties with >=1 endocrinologist: {len(df_endo_county):,}")
+    df_endo_county.to_csv(TEMP / "npi_endocrinologist_county.csv", index=False)
+    print("Saved: npi_endocrinologist_county.csv")
+```
 
-df_amc_county = (
-    df_amc_raw.dropna(subset=["county_fips"])
-    .groupby("county_fips")
-    .agg(amc_count=("npi", "nunique"))
-    .reset_index()
-)
-ctsa_df = pd.DataFrame({"county_fips": list(CTSA_HUBS_FIPS), "has_ctsa": 1})
-df_amc_county = (
-    df_amc_county.merge(ctsa_df, on="county_fips", how="outer")
-    .fillna({"amc_count": 0, "has_ctsa": 0})
-)
-df_amc_county["amc_count"] = df_amc_county["amc_count"].astype(int)
-df_amc_county["has_ctsa"]  = df_amc_county["has_ctsa"].astype(int)
+```{python}
+#| label: county-amc-presence
+#| output: false
+if csvs_cached(TEMP / "amc_presence_county.csv"):
+    print("[CACHE] Loading AMC county presence from CSV cache ...")
+else:
+    # ── 5-H  Academic Medical Center (AMC) Presence ─────────────────────────────
+    # Source 1: NPI-2 org search (keywords: university, medical school, etc.)
+    # Source 2: Hardcoded CTSA hub county FIPS (NIH NCATS list)
+    # Requires ZIP2COUNTY dict from Cell 5-G
 
-df_amc_county.to_csv(TEMP / "amc_presence_county.csv", index=False)
-print(f"Saved: amc_presence_county.csv  ({len(df_amc_county):,} counties)")
-print(f"  CTSA hub counties: {(df_amc_county['has_ctsa'] == 1).sum()}")
+    NPI_URL      = "https://npiregistry.cms.hhs.gov/api/"
+    AMC_KEYWORDS = ["university", "medical school", "medical college", "cancer center"]
+    AMC_SLEEP    = 0.25
+
+    # CTSA hub county FIPS (hardcoded — one-off lookup from NIH NCATS hub list)
+    CTSA_HUBS_FIPS = {
+        "01073", "01089", "04019", "06037", "06059", "06073", "06075", "06085", "06113",
+        "08031", "09009", "11001", "12001", "12057", "12086", "13121", "15003",
+        "17019", "17031", "18097", "19103", "20091", "21067", "22033", "22071",
+        "24031", "24510", "25017", "25025", "26161", "27003", "29189", "31055",
+        "33015", "34023", "35001", "36055", "36061", "37063", "37067", "37135",
+        "39035", "39049", "40109", "41051", "42003", "42101", "44007", "45019",
+        "47037", "48029", "48113", "49035", "50007", "51540", "51760", "53033", "55025", "55079",
+    }
+
+    # ── NPI-2 org search ─────────────────────────────────────────────────────────
+    amc_records = []
+    for state in sorted(US_STATE_ABBR):
+        for kw in AMC_KEYWORDS:
+            skip = 0
+            while skip <= 400:
+                params = {
+                    "version": "2.1",
+                    "enumeration_type": "NPI-2",
+                    "organization_name": kw,
+                    "state": state,
+                    "limit": 200,
+                    "skip": skip,
+                }
+                r = requests.get(NPI_URL, params=params, timeout=60)
+                r.raise_for_status()
+                results = r.json().get("results", [])
+                if not results:
+                    break
+                amc_records.extend(results)
+                if len(results) < 200:
+                    break
+                skip += 200
+                time.sleep(AMC_SLEEP)
+    save_json(RAW / "npi_amc_county_records.json", amc_records)
+    print(f"AMC NPI-2 records fetched: {len(amc_records):,}")
+
+    def _extract_zip(rec):
+        addrs = rec.get("addresses", [])
+        for a in addrs:
+            if a.get("address_purpose") == "LOCATION":
+                return str(a.get("postal_code", ""))[:5]
+        return str(addrs[0].get("postal_code", ""))[:5] if addrs else None
+
+    df_amc_raw = pd.DataFrame({
+        "npi":      [r.get("number") for r in amc_records],
+        "org_name": [r.get("basic", {}).get("organization_name", "") for r in amc_records],
+        "zip5":     [_extract_zip(r) for r in amc_records],
+    }).drop_duplicates(subset=["npi"])
+    df_amc_raw["county_fips"] = df_amc_raw["zip5"].map(ZIP2COUNTY)
+
+    df_amc_county = (
+        df_amc_raw.dropna(subset=["county_fips"])
+        .groupby("county_fips")
+        .agg(amc_count=("npi", "nunique"))
+        .reset_index()
+    )
+    ctsa_df = pd.DataFrame({"county_fips": list(CTSA_HUBS_FIPS), "has_ctsa": 1})
+    df_amc_county = (
+        df_amc_county.merge(ctsa_df, on="county_fips", how="outer")
+        .fillna({"amc_count": 0, "has_ctsa": 0})
+    )
+    df_amc_county["amc_count"] = df_amc_county["amc_count"].astype(int)
+    df_amc_county["has_ctsa"]  = df_amc_county["has_ctsa"].astype(int)
+
+    df_amc_county.to_csv(TEMP / "amc_presence_county.csv", index=False)
+    print(f"Saved: amc_presence_county.csv  ({len(df_amc_county):,} counties)")
+    print(f"  CTSA hub counties: {(df_amc_county['has_ctsa'] == 1).sum()}")
 ```
 
 ```{python}
 #| label: county-master-table
 #| output: false
-# 5-I  County Master Table Assembly
+if csvs_cached(TEMP / "county_coverage_alignment.csv"):
+    print("[CACHE] Loading county master table from CSV cache ...")
+else:
+    # 5-I  County Master Table Assembly
 
-def _load(fname):
-    return pd.read_csv(TEMP / fname, dtype={"county_fips": str})
+    def _load(fname):
+        return pd.read_csv(TEMP / fname, dtype={"county_fips": str})
 
+    df_dist = _load("county_distance_to_trial.csv")
+    df_trial_agg = _load("county_trial_aggregates.csv")
+    df_acs = _load("acs_county_2022_features.csv")
+    df_places = _load("cdc_places_county_wide.csv")
+    df_endo = _load("npi_endocrinologist_county.csv")
+    df_amc = _load("amc_presence_county.csv")
 
-df_dist = _load("county_distance_to_trial.csv")
-df_trial_agg = _load("county_trial_aggregates.csv")
-df_acs = _load("acs_county_2022_features.csv")
-df_places = _load("cdc_places_county_wide.csv")
-df_endo = _load("npi_endocrinologist_county.csv")
-df_amc = _load("amc_presence_county.csv")
+    for df in [df_dist, df_trial_agg, df_acs, df_places, df_endo, df_amc]:
+        df["county_fips"] = df["county_fips"].astype(str).str.zfill(5)
 
-for df in [df_dist, df_trial_agg, df_acs, df_places, df_endo, df_amc]:
-    df["county_fips"] = df["county_fips"].astype(str).str.zfill(5)
+    acs_keep = [c for c in [
+        "county_fips", "pop_total", "median_hh_income", "gini_index",
+        "pct_poverty", "pct_nhwhite", "pct_nhblack", "pct_hispanic",
+        "pct_no_vehicle", "pct_no_internet", "pct_unemployed",
+        "pct_uninsured", "pct_bachelors_plus",
+    ] if c in df_acs.columns]
 
-acs_keep = [c for c in [
-    "county_fips", "pop_total", "median_hh_income", "gini_index",
-    "pct_poverty", "pct_nhwhite", "pct_nhblack", "pct_hispanic",
-    "pct_no_vehicle", "pct_no_internet", "pct_unemployed",
-    "pct_uninsured", "pct_bachelors_plus",
-] if c in df_acs.columns]
-
-df_county = (
-    pd.DataFrame({"county_fips": df_dist["county_fips"].unique()})
-    .merge(df_dist, on="county_fips", how="left")
-    .merge(df_trial_agg, on="county_fips", how="left")
-    .merge(df_acs[acs_keep], on="county_fips", how="left")
-    .merge(df_places, on="county_fips", how="left")
-    .merge(df_endo[["county_fips", "endo_count"]], on="county_fips", how="left")
-    .merge(df_amc[["county_fips", "amc_count", "has_ctsa"]], on="county_fips", how="left")
-)
-
-for col in ["county_site_count", "county_trial_count", "endo_count", "amc_count", "has_ctsa"]:
-    if col in df_county.columns:
-        df_county[col] = df_county[col].fillna(0).astype(int)
-
-pop_safe = df_county["pop_total"].replace(0, float("nan"))
-df_county["trials_per_100k"] = df_county["county_trial_count"] / (pop_safe / 100_000)
-df_county["endo_per_100k"] = df_county["endo_count"] / (pop_safe / 100_000)
-
-if "places_diabetes" in df_county.columns:
-    df_county["burden_decile"] = pd.qcut(
-        df_county["places_diabetes"].rank(method="first", na_option="bottom"),
-        q=10,
-        labels=False,
+    df_county = (
+        pd.DataFrame({"county_fips": df_dist["county_fips"].unique()})
+        .merge(df_dist, on="county_fips", how="left")
+        .merge(df_trial_agg, on="county_fips", how="left")
+        .merge(df_acs[acs_keep], on="county_fips", how="left")
+        .merge(df_places, on="county_fips", how="left")
+        .merge(df_endo[["county_fips", "endo_count"]], on="county_fips", how="left")
+        .merge(df_amc[["county_fips", "amc_count", "has_ctsa"]], on="county_fips", how="left")
     )
-    expected = df_county.groupby("burden_decile")["trials_per_100k"].transform("median")
-    df_county["coverage_residual"] = df_county["trials_per_100k"] - expected
 
-print(f"County master table: {len(df_county):,} rows x {len(df_county.columns)} columns")
-print(f"  % with trial site: {(df_county['county_trial_count'] > 0).mean() * 100:.1f}%")
-if "places_diabetes" in df_county.columns:
-    print(f"  PLACES diabetes coverage:  {df_county['places_diabetes'].notna().mean() * 100:.1f}%")
-print(f"  Endo density (any county): {(df_county['endo_per_100k'] > 0).mean() * 100:.1f}%")
+    for col in ["county_site_count", "county_trial_count", "endo_count", "amc_count", "has_ctsa"]:
+        if col in df_county.columns:
+            df_county[col] = df_county[col].fillna(0).astype(int)
 
-df_county.to_csv(TEMP / "county_coverage_alignment.csv", index=False)
-print("Saved: county_coverage_alignment.csv")
+    pop_safe = df_county["pop_total"].replace(0, float("nan"))
+    df_county["trials_per_100k"] = df_county["county_trial_count"] / (pop_safe / 100_000)
+    df_county["endo_per_100k"] = df_county["endo_count"] / (pop_safe / 100_000)
+
+    if "places_diabetes" in df_county.columns:
+        df_county["burden_decile"] = pd.qcut(
+            df_county["places_diabetes"].rank(method="first", na_option="bottom"),
+            q=10,
+            labels=False,
+        )
+        expected = df_county.groupby("burden_decile")["trials_per_100k"].transform("median")
+        df_county["coverage_residual"] = df_county["trials_per_100k"] - expected
+
+    print(f"County master table: {len(df_county):,} rows x {len(df_county.columns)} columns")
+    print(f"  % with trial site: {(df_county['county_trial_count'] > 0).mean() * 100:.1f}%")
+    if "places_diabetes" in df_county.columns:
+        print(f"  PLACES diabetes coverage:  {df_county['places_diabetes'].notna().mean() * 100:.1f}%")
+    print(f"  Endo density (any county): {(df_county['endo_per_100k'] > 0).mean() * 100:.1f}%")
+
+    df_county.to_csv(TEMP / "county_coverage_alignment.csv", index=False)
+    print("Saved: county_coverage_alignment.csv")
 ```
 
 ```{python}
@@ -2065,8 +2179,10 @@ else:
 fig.suptitle("EDA on Final Modeling Datasets", fontsize=14)
 fig.tight_layout()
 fig.savefig(RESULTS / "final_dataset_eda_overview.png", dpi=200)
+fig.savefig(PRODUCT_RESULTS / "final_dataset_eda_overview.png", dpi=200)
 plt.show()
 print("Saved figure:", RESULTS / "final_dataset_eda_overview.png")
+print("Saved figure:", PRODUCT_RESULTS / "final_dataset_eda_overview.png")
 ```
 
 ## 7. Ready for Modeling
@@ -2172,7 +2288,9 @@ fig, ax = plt.subplots(figsize=(12, 10))
 sns.heatmap(corr, annot=True, fmt=".2f", cmap="RdBu_r", center=0, square=True, ax=ax)
 ax.set_title("Predictor Correlation Heatmap")
 plt.tight_layout()
+fig.savefig(PRODUCT_RESULTS / "predictor_correlation_heatmap.png", dpi=200)
 plt.show()
+print("Saved figure:", PRODUCT_RESULTS / "predictor_correlation_heatmap.png")
 ```
 
 ```{python}
@@ -2235,7 +2353,9 @@ ax.axvline(x=0, color="black", linewidth=0.8)
 ax.set_xlabel("Standardized Coefficient")
 ax.set_title("Elastic Net Coefficients — Trial Access (red) vs Socioeconomic (blue)")
 plt.tight_layout()
+fig.savefig(PRODUCT_RESULTS / "elastic_net_coefficients.png", dpi=200)
 plt.show()
+print("Saved figure:", PRODUCT_RESULTS / "elastic_net_coefficients.png")
 ```
 
 ```{python}
@@ -2247,7 +2367,9 @@ ax.set_xlabel("Actual places_diabetes (%)")
 ax.set_ylabel("Predicted places_diabetes — CV (%)")
 ax.set_title(f"Actual vs Predicted  |  CV R² = {r2:.3f}")
 plt.tight_layout()
+fig.savefig(PRODUCT_RESULTS / "elastic_net_actual_vs_predicted.png", dpi=200)
 plt.show()
+print("Saved figure:", PRODUCT_RESULTS / "elastic_net_actual_vs_predicted.png")
 ```
 
 ```{python}
@@ -2317,7 +2439,9 @@ ax.barh(imp_df["predictor"], imp_df["importance"], xerr=imp_df["std"],
 ax.set_xlabel("Permutation Importance (mean decrease in R\u00b2)")
 ax.set_title("Random Forest (tuned) Permutation Importance \u2014 Trial Access (red) vs Socioeconomic (blue)")
 plt.tight_layout()
+fig.savefig(PRODUCT_RESULTS / "rf_permutation_importance.png", dpi=200)
 plt.show()
+print("Saved figure:", PRODUCT_RESULTS / "rf_permutation_importance.png")
 ```
 
 ```{python}
@@ -2388,7 +2512,9 @@ ax.set_xticklabels(model_comparison["Model"])
 ax.set_title("5-fold CV Model Comparison")
 ax.legend()
 plt.tight_layout()
+fig.savefig(PRODUCT_RESULTS / "model_comparison_cv.png", dpi=200)
 plt.show()
+print("Saved figure:", PRODUCT_RESULTS / "model_comparison_cv.png")
 ```
 
 ### SHAP Analysis
@@ -2403,7 +2529,11 @@ best_xgb.fit(X_raw, y)
 explainer   = shap.TreeExplainer(best_xgb)
 shap_values = explainer.shap_values(X_raw)
 
-shap.summary_plot(shap_values, X_raw, feature_names=all_predictors, show=True)
+shap.summary_plot(shap_values, X_raw, feature_names=all_predictors, show=False)
+plt.tight_layout()
+plt.savefig(PRODUCT_RESULTS / "shap_summary_plot.png", dpi=200, bbox_inches="tight")
+plt.show()
+print("Saved figure:", PRODUCT_RESULTS / "shap_summary_plot.png")
 ```
 
 ```{python}
@@ -2434,7 +2564,9 @@ plt.title(
     "Trial Access (red) vs Other Groups (green)"
 )
 plt.tight_layout()
+plt.savefig(PRODUCT_RESULTS / "shap_group_importance.png", dpi=200, bbox_inches="tight")
 plt.show()
+print("Saved figure:", PRODUCT_RESULTS / "shap_group_importance.png")
 ```
 
 ### Interpretation
