@@ -11,6 +11,9 @@ format:
     theme: cosmo
 ---
 
+# Github Repo
+https://github.com/shifosss/JSC370-Midterm-Proj
+
 # Introduction
 
 ## Background and Motivation
