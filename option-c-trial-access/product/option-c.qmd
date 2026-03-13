@@ -1,6 +1,5 @@
 ---
 title: "Option C - Clinical Trial Access Gap for Type 2 Diabetes"
-subtitle: "Analysis, exploratory results, and model-ready data products"
 author: "Chen Zhang"
 date: today
 format:
